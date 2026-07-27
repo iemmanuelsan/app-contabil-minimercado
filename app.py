@@ -468,7 +468,8 @@ def gerar_pdf_cartao_cnpj_oficial(d):
     pdf.cell(70, 10, tratar_texto_pdf(f"TELEFONE: {d['telefone']}"), border=1, ln=True)
     pdf.cell(120, 10, tratar_texto_pdf(f"SITUACAO CADASTRAL: {d['situacao']}"), border=1)
     pdf.cell(70, 10, tratar_texto_pdf(f"PORTE: {d['porte']}"), border=1, ln=True)
-    return bytes(pdf.output(), encoding='latin-1')
+    res = pdf.output()
+    return bytes(res) if isinstance(res, (bytes, bytearray)) else bytes(res, encoding='latin-1')
 
 # --- EXPORTAÇÃO DOSSIÊ COMPLETO EM EXCEL (4 ABAS DETALHADAS) ---
 def gerar_excel_dossie_4abas(lista_empresas):
@@ -657,7 +658,8 @@ def gerar_pdf_dossie_completo(emp):
     pdf.cell(0, 5, "[  ] Para Serviços: Checar folha de pagamento para aplicar Fator R (Atingir 28% para tributar em 6%).", ln=True)
     pdf.cell(0, 5, "[  ] Validar somatorio de faturamento do socio em outras empresas do Simples (Teto R$ 4.8 mi).", ln=True)
 
-    return bytes(pdf.output(), encoding='latin-1')
+    res = pdf.output()
+    return bytes(res) if isinstance(res, (bytes, bytearray)) else bytes(res, encoding='latin-1')
 
 # --- PROPOSTA COMERCIAL EM PDF ---
 def gerar_proposta_minimercado_pdf(emp, fat_mensal, hon_sugeridos):
@@ -711,7 +713,8 @@ def gerar_proposta_minimercado_pdf(emp, fat_mensal, hon_sugeridos):
     pdf.set_font("Helvetica", "I", 8)
     pdf.cell(0, 5, tratar_texto_pdf(f"Proposta gerada em {datetime.date.today().strftime('%d/%m/%Y')}. Validade: 15 dias."), ln=True, align="C")
 
-    return bytes(pdf.output(), encoding='latin-1')
+    res = pdf.output()
+    return bytes(res) if isinstance(res, (bytes, bytearray)) else bytes(res, encoding='latin-1')
 
 # --- RENDERIZADOR DOS 4 PAINÉIS ---
 def renderizar_paineis_dossie(d):

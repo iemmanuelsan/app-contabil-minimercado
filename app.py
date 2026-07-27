@@ -12,10 +12,14 @@ from openpyxl.utils import get_column_letter
 from fpdf import FPDF
 
 # Configuração da página
-st.set_page_config(page_title="Plataforma de Inteligência Contábil para Mini Mercados Autônomos", page_icon="🛒", layout="wide")
+st.set_page_config(
+    page_title="Mercabiliza | Inteligência Tributária & Onboarding", 
+    page_icon="🛒", 
+    layout="wide"
+)
 
-st.title("🛒 Plataforma de Onboarding, Diagnóstico Tributário & Vendas Contábeis")
-st.caption("Solução Completa e Especializada: Dossiê de 4 Painéis, Cartão CNPJ (HTML & PDF), PIS/COFINS Monofásico, Fator R, Comparador Tríplice, Calculadora MEI Retroativa, CRM Local e Proposta Comercial em PDF.")
+st.title("🛒 Mercabiliza | Inteligência Tributária & Onboarding Contábil")
+st.caption("Solução Especializada para Mini Mercados Autônomos: Dossiê de 4 Painéis, Cartão CNPJ, PIS/COFINS Monofásico, Comparador de Regimes, Calculadora MEI e CRM Integrado.")
 
 # --- BANCO DE DADOS LOCAL (SQLITE CRM) ---
 def init_db():

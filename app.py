@@ -89,6 +89,59 @@ def limpar_cnpj(cnpj_raw):
     cnpj_limpo = re.sub(r'\D', '', str(cnpj_raw))
     return cnpj_limpo if len(cnpj_limpo) == 14 else None
 
+# --- INTEGRAÇÃO: API DO BANCO CENTRAL DO BRASIL (SGS) ---
+@st.cache_data(ttl=86400)
+def obter_indicadores_bacen():
+    """Consulta indicadores Selic e IPCA em tempo real do Banco Central do Brasil."""
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    selic_ano = 10.50  # Fallback
+    ipca_ano = 4.00   # Fallback
+    
+    try:
+        # Série 4390: Selic acumulada no mês
+        r_selic = requests.get("https://api.bcb.gov.br/dados/serie/bcdata.sgs.4390/dados/ultimos/12?formato=json", headers=headers, timeout=5)
+        if r_selic.status_code == 200:
+            dados = r_selic.json()
+            soma = sum(float(item["valor"]) for item in dados if "valor" in item)
+            if soma > 0: selic_ano = soma
+    except Exception:
+        pass
+
+    try:
+        # Série 10844: IPCA mensal
+        r_ipca = requests.get("https://api.bcb.gov.br/dados/serie/bcdata.sgs.10844/dados/ultimos/12?formato=json", headers=headers, timeout=5)
+        if r_ipca.status_code == 200:
+            dados = r_ipca.json()
+            soma = sum(float(item["valor"]) for item in dados if "valor" in item)
+            if soma > 0: ipca_ano = soma
+    except Exception:
+        pass
+
+    return round(selic_ano, 2), round(ipca_ano, 2)
+
+# --- INTEGRAÇÃO: API DO IBGE (LOCALIDADES) ---
+@st.cache_data(ttl=604800)
+def consultar_dados_ibge_municipio(nome_municipio, uf):
+    """Obtém o código do IBGE e região a partir da API oficial do IBGE."""
+    if not nome_municipio or not uf:
+        return {"cod_ibge": "N/A", "regiao": "N/A"}
+    
+    try:
+        url = f"https://servicodados.ibge.gov.br/api/v1/localidades/estados/{uf}/municipios"
+        r = requests.get(url, timeout=5)
+        if r.status_code == 200:
+            municipios = r.json()
+            nome_norm = nome_municipio.strip().lower()
+            for m in municipios:
+                if m.get("nome", "").strip().lower() == nome_norm:
+                    cod_ibge = str(m.get("id", "N/A"))
+                    regiao = m.get("microrregiao", {}).get("mesorregiao", {}).get("UF", {}).get("regiao", {}).get("nome", "Brasil")
+                    return {"cod_ibge": cod_ibge, "regiao": regiao}
+    except Exception:
+        pass
+        
+    return {"cod_ibge": "N/A", "regiao": "Brasil"}
+
 # --- MOTOR DE INTELIGÊNCIA TRIBUTÁRIA E ENGENHARIA FISCAL ---
 def analisar_cnae_tributario(cnae_code, cnae_desc):
     code_clean = re.sub(r'\D', '', str(cnae_code))
@@ -180,9 +233,10 @@ def comparar_regimes_simples_presumido(fat_mensal, margem_pct=15.0, tipo_lucro="
 
     return imp_simples, imp_presumido, melhor_regime, economia_anual
 
-# --- CÁLCULO RETROATIVO DO MEI REVISADO E BLINDADO FISCALMENTE ---
+# --- CÁLCULO RETROATIVO DO MEI COM TAXA SELIC DO BACEN EM TEMPO REAL ---
 def calcular_imposto_retroativo_mei(faturamento_anual, meses_atividade, pct_monofasico=55.0):
     limite_prop = meses_atividade * 6750.0
+    selic_real, ipca_real = obter_indicadores_bacen()
     
     if faturamento_anual <= limite_prop:
         return {
@@ -230,8 +284,9 @@ def calcular_imposto_retroativo_mei(faturamento_anual, meses_atividade, pct_mono
             "Todas as vendas do ano serão apuradas no PGDAS-D com compensação das guias DAS-MEI fixas já pagas."
         )
 
-    # 3. Estimativa de Encargos de Mora em Atraso (Multa + Juros Selic ~15%)
-    encargos_estimados = imposto_bruto * 0.15 if requer_retroativo else 0.0
+    # 3. Estimativa de Encargos com base na Selic Oficial do BACEN (Multa 10% + Selic em tempo real)
+    taxa_mora = (selic_real / 100.0) if requer_retroativo else 0.0
+    encargos_estimados = imposto_bruto * (0.10 + taxa_mora) if requer_retroativo else 0.0
     imposto_total_final = imposto_bruto + encargos_estimados
 
     return {
@@ -242,7 +297,8 @@ def calcular_imposto_retroativo_mei(faturamento_anual, meses_atividade, pct_mono
         "encargos_estimados": encargos_estimados,
         "imposto_total_com_encargos": imposto_total_final,
         "orientacao": orientacao,
-        "limite_prop": limite_prop
+        "limite_prop": limite_prop,
+        "selic_usada": selic_real
     }
 
 def consultar_regularidade_compliance(cnpj, situacao_cadastral="ATIVA"):
@@ -263,28 +319,35 @@ def consultar_regularidade_compliance(cnpj, situacao_cadastral="ATIVA"):
         "processos_judiciais": "🟢 Sem Apontamentos Públicos", "obs_processos": "Sem registros impeditivos."
     }
 
-# --- CONSULTA SIMULTÂNEA MULTI-FONTE (BRASILAPI + CNPJ.WS) ---
+# --- CONSULTA SIMULTÂNEA TRIPLA-FONTE (BRASILAPI + CNPJ.WS + RECEITAWS) ---
 def consultar_dossie_completo(cnpj):
     headers = {'User-Agent': 'Mozilla/5.0'}
+    
+    # FONTE 1: BrasilAPI
     dados_br = None
     try:
         r = requests.get(f"https://brasilapi.com.br/api/cnpj/v1/{cnpj}", headers=headers, timeout=8)
-        if r.status_code == 200: 
-            dados_br = r.json()
-    except Exception: 
-        pass
+        if r.status_code == 200: dados_br = r.json()
+    except Exception: pass
 
+    # FONTE 2: CNPJ.ws
     dados_ws = None
     try:
         r = requests.get(f"https://publica.cnpj.ws/cnpj/{cnpj}", headers=headers, timeout=8)
-        if r.status_code == 200: 
-            dados_ws = r.json()
-    except Exception: 
-        pass
+        if r.status_code == 200: dados_ws = r.json()
+    except Exception: pass
 
-    if not dados_br and not dados_ws:
+    # FONTE 3: ReceitaWS (3ª fonte de redundância)
+    dados_rws = None
+    try:
+        r = requests.get(f"https://receitaws.com.br/v1/cnpj/{cnpj}", headers=headers, timeout=8)
+        if r.status_code == 200 and r.json().get("status") != "ERROR": dados_rws = r.json()
+    except Exception: pass
+
+    if not dados_br and not dados_ws and not dados_rws:
         return None
 
+    # MESCLAGEM TRIPLA DE CONTATOS (TELEFONES E E-MAILS)
     telefones_set = set()
     emails_set = set()
 
@@ -300,11 +363,20 @@ def consultar_dossie_completo(cnpj):
         tel1 = estab.get("telefone1") or ""
         if ddd1 or tel1: telefones_set.add(f"({ddd1}) {tel1}".strip())
 
+    if dados_rws:
+        if dados_rws.get("email"): emails_set.add(dados_rws.get("email").lower())
+        if dados_rws.get("telefone"): telefones_set.add(dados_rws.get("telefone"))
+
     email_str = ", ".join(emails_set) if emails_set else "Não informado"
     telefone_str = ", ".join(telefones_set) if telefones_set else "Não informado"
 
-    cnae_prin_cod = dados_br.get("cnae_fiscal") if dados_br else dados_ws.get("estabelecimento", {}).get("atividade_principal", {}).get("subclasse")
-    cnae_prin_desc = dados_br.get("cnae_fiscal_descricao") if dados_br else dados_ws.get("estabelecimento", {}).get("atividade_principal", {}).get("descricao")
+    cnae_prin_cod = (dados_br.get("cnae_fiscal") if dados_br else None) or \
+                    (dados_ws.get("estabelecimento", {}).get("atividade_principal", {}).get("subclasse") if dados_ws else None) or \
+                    (dados_rws.get("atividade_principal", [{}])[0].get("code") if dados_rws else "")
+                    
+    cnae_prin_desc = (dados_br.get("cnae_fiscal_descricao") if dados_br else None) or \
+                     (dados_ws.get("estabelecimento", {}).get("atividade_principal", {}).get("descricao") if dados_ws else None) or \
+                     (dados_rws.get("atividade_principal", [{}])[0].get("text") if dados_rws else "")
     
     diag_principal = analisar_cnae_tributario(cnae_prin_cod, cnae_prin_desc)
 
@@ -312,12 +384,12 @@ def consultar_dossie_completo(cnpj):
     cnaes_secundarios_analise = []
     
     raw_sec = dados_br.get("cnaes_secundarios", []) if dados_br else []
-    if not raw_sec and dados_ws:
-        raw_sec = dados_ws.get("estabelecimento", {}).get("atividades_secundarias", [])
+    if not raw_sec and dados_ws: raw_sec = dados_ws.get("estabelecimento", {}).get("atividades_secundarias", [])
+    if not raw_sec and dados_rws: raw_sec = dados_rws.get("atividades_secundarias", [])
         
     for item in raw_sec:
-        cod = item.get("codigo") or item.get("subclasse")
-        desc = item.get("descricao")
+        cod = item.get("codigo") or item.get("subclasse") or item.get("code")
+        desc = item.get("descricao") or item.get("text")
         if cod and desc:
             cnaes_secundarios_lista.append(f"{cod} - {desc}")
             diag_sec = analisar_cnae_tributario(cod, desc)
@@ -334,8 +406,7 @@ def consultar_dossie_completo(cnpj):
             uf = ie.get("estado", {}).get("sigla", "")
             status = "Ativa" if ie.get("ativo") else "Inativa/Baixada"
             ies.append(f"{num} ({uf}) - [{status}]")
-        if estab.get("inscricao_municipal"):
-            im = str(estab.get("inscricao_municipal"))
+        if estab.get("inscricao_municipal"): im = str(estab.get("inscricao_municipal"))
 
     qsa = []
     if dados_br and "qsa" in dados_br:
@@ -354,24 +425,35 @@ def consultar_dossie_completo(cnpj):
                 "faixa_etaria": "N/A",
                 "alerta_outras_empresas": "⚠️ VERIFICAR: Se este sócio possui mais de 10% em outra empresa do Simples Nacional."
             })
+    elif dados_rws and "qsa" in dados_rws:
+        for s in dados_rws["qsa"]:
+            qsa.append({
+                "nome": s.get("nome"),
+                "qualificacao": s.get("qual"),
+                "faixa_etaria": "N/A",
+                "alerta_outras_empresas": "⚠️ VERIFICAR: Se este sócio possui mais de 10% em outra empresa do Simples Nacional."
+            })
             
     tem_risco_societario = len(qsa) > 1
 
-    razao = (dados_br.get("razao_social") if dados_br else dados_ws.get("razao_social"))
-    fantasia = (dados_br.get("nome_fantasia") if dados_br else dados_ws.get("estabelecimento", {}).get("nome_fantasia")) or razao
-    situacao = (dados_br.get("descricao_situacao_cadastral") if dados_br else dados_ws.get("estabelecimento", {}).get("situacao_cadastral")) or "ATIVA"
-    porte = (dados_br.get("porte") if dados_br else dados_ws.get("porte", {}).get("descricao"))
-    nat_juridica = (dados_br.get("natureza_juridica") if dados_br else dados_ws.get("natureza_juridica", {}).get("descricao"))
+    razao = (dados_br.get("razao_social") if dados_br else None) or (dados_ws.get("razao_social") if dados_ws else None) or dados_rws.get("nome")
+    fantasia = (dados_br.get("nome_fantasia") if dados_br else None) or (dados_ws.get("estabelecimento", {}).get("nome_fantasia") if dados_ws else None) or dados_rws.get("fantasia") or razao
+    situacao = (dados_br.get("descricao_situacao_cadastral") if dados_br else None) or (dados_ws.get("estabelecimento", {}).get("situacao_cadastral") if dados_ws else None) or dados_rws.get("situacao") or "ATIVA"
+    porte = (dados_br.get("porte") if dados_br else None) or (dados_ws.get("porte", {}).get("descricao") if dados_ws else None) or dados_rws.get("porte")
+    nat_juridica = (dados_br.get("natureza_juridica") if dados_br else None) or (dados_ws.get("natureza_juridica", {}).get("descricao") if dados_ws else None) or dados_rws.get("natureza_juridica")
     
-    op_simples = dados_br.get("opcao_pelo_simples") if dados_br else (dados_ws.get("simples", {}).get("simples") == "Sim")
-    op_mei = dados_br.get("opcao_pelo_mei") if dados_br else (dados_ws.get("simples", {}).get("mei") == "Sim")
+    op_simples = (dados_br.get("opcao_pelo_simples") if dados_br else None) or (dados_ws.get("simples", {}).get("simples") == "Sim" if dados_ws else False) or (dados_rws.get("simples", {}).get("optante") if dados_rws else False)
+    op_mei = (dados_br.get("opcao_pelo_mei") if dados_br else None) or (dados_ws.get("simples", {}).get("mei") == "Sim" if dados_ws else False) or (dados_rws.get("simei", {}).get("optante") if dados_rws else False)
 
-    logradouro = dados_br.get("logradouro") if dados_br else dados_ws.get("estabelecimento", {}).get("logradouro")
-    numero = dados_br.get("numero") if dados_br else dados_ws.get("estabelecimento", {}).get("numero")
-    bairro = dados_br.get("bairro") if dados_br else dados_ws.get("estabelecimento", {}).get("bairro")
-    municipio = dados_br.get("municipio") if dados_br else dados_ws.get("estabelecimento", {}).get("cidade", {}).get("nome")
-    uf = dados_br.get("uf") if dados_br else dados_ws.get("estabelecimento", {}).get("estado", {}).get("sigla")
-    cep = dados_br.get("cep") if dados_br else dados_ws.get("estabelecimento", {}).get("cep")
+    logradouro = (dados_br.get("logradouro") if dados_br else None) or (dados_ws.get("estabelecimento", {}).get("logradouro") if dados_ws else None) or dados_rws.get("logradouro")
+    numero = (dados_br.get("numero") if dados_br else None) or (dados_ws.get("estabelecimento", {}).get("numero") if dados_ws else None) or dados_rws.get("numero")
+    bairro = (dados_br.get("bairro") if dados_br else None) or (dados_ws.get("estabelecimento", {}).get("bairro") if dados_ws else None) or dados_rws.get("bairro")
+    municipio = (dados_br.get("municipio") if dados_br else None) or (dados_ws.get("estabelecimento", {}).get("cidade", {}).get("nome") if dados_ws else None) or dados_rws.get("municipio")
+    uf = (dados_br.get("uf") if dados_br else None) or (dados_ws.get("estabelecimento", {}).get("estado", {}).get("sigla") if dados_ws else None) or dados_rws.get("uf")
+    cep = (dados_br.get("cep") if dados_br else None) or (dados_ws.get("estabelecimento", {}).get("cep") if dados_ws else None) or dados_rws.get("cep")
+
+    # ENRIQUECIMENTO DE DADOS COM API DO IBGE
+    dados_ibge = consultar_dados_ibge_municipio(municipio, uf)
 
     end_encoded = f"{logradouro}, {numero} - {bairro}, {municipio} - {uf}".replace(" ", "+")
     maps_url = f"https://www.google.com/maps/search/?api=1&query={end_encoded}"
@@ -389,7 +471,7 @@ def consultar_dossie_completo(cnpj):
         "telefone": telefone_str,
         "opcao_simples": op_simples,
         "opcao_mei": op_mei,
-        "capital_social": float(dados_br.get("capital_social", 0.0)) if dados_br else float(dados_ws.get("capital_social", 0.0)),
+        "capital_social": float(dados_br.get("capital_social", 0.0)) if dados_br else float(dados_ws.get("capital_social", 0.0) if dados_ws else 0.0),
         "cnae_principal_str": f"{cnae_prin_cod} - {cnae_prin_desc}",
         "diag_principal": diag_principal,
         "cnaes_secundarios_lista": cnaes_secundarios_lista,
@@ -400,7 +482,8 @@ def consultar_dossie_completo(cnpj):
         "maps_url": maps_url,
         "matriz_filial": "MATRIZ" if (dados_br and dados_br.get("identificador_matriz_filial") == 1) else "FILIAL",
         "logradouro": logradouro, "numero": numero, "bairro": bairro, "municipio": municipio, "uf": uf, "cep": cep,
-        "data_abertura": dados_br.get("data_inicio_atividade") if dados_br else dados_ws.get("estabelecimento", {}).get("data_inicio_atividade")
+        "cod_ibge": dados_ibge["cod_ibge"], "regiao_macro": dados_ibge["regiao"],
+        "data_abertura": (dados_br.get("data_inicio_atividade") if dados_br else None) or (dados_ws.get("estabelecimento", {}).get("data_inicio_atividade") if dados_ws else None) or dados_rws.get("abertura")
     }
 
     salvar_lead_db(emp_dict)
@@ -438,7 +521,7 @@ def renderizar_cartao_cnpj_html(d):
                 <td colspan="2" style="border: 1px solid #000; padding: 5px;"><b>CÓDIGO E DESCRIÇÃO DA NATUREZA JURÍDICA:</b><br>{d['natureza_juridica']}</td>
             </tr>
             <tr>
-                <td colspan="2" style="border: 1px solid #000; padding: 5px;"><b>LOGRADOURO, NÚMERO, BAIRRO, MUNICÍPIO/UF e CEP:</b><br>{d['logradouro']}, {d['numero']} - {d['bairro']}, {d['municipio']}/{d['uf']} - CEP: {d['cep']}</td>
+                <td colspan="2" style="border: 1px solid #000; padding: 5px;"><b>LOGRADOURO, NÚMERO, BAIRRO, MUNICÍPIO/UF, REGIAO e CEP:</b><br>{d['logradouro']}, {d['numero']} - {d['bairro']}, {d['municipio']}/{d['uf']} ({d['regiao_macro']}) - CEP: {d['cep']} [IBGE: {d['cod_ibge']}]</td>
             </tr>
             <tr>
                 <td style="border: 1px solid #000; padding: 5px;"><b>ENDEREÇO DE CORREIO ELETRÔNICO (E-MAIL):</b><br>{d['email']}</td>
@@ -501,13 +584,13 @@ def gerar_excel_dossie_4abas(lista_empresas):
     # ABA 1: RESUMO CADASTRAL
     ws1 = wb.active
     ws1.title = "Resumo Cadastral"
-    ws1.merge_cells("A1:N1")
+    ws1.merge_cells("A1:O1")
     ws1["A1"] = "DOSSIÊ DE ONBOARDING CONTÁBIL COMPLETO"
     ws1["A1"].font = Font(name="Calibri", size=15, bold=True, color="FFFFFF")
     ws1["A1"].fill = title_fill
     ws1["A1"].alignment = Alignment(horizontal="center", vertical="center")
 
-    headers1 = ["CNPJ", "Razão Social", "Nome Fantasia", "Situação Cadastral", "Regime", "E-mail", "Telefone", "CNAE Principal", "Anexo Simples", "Capital Social", "Inscrição Municipal", "Inscrição Estadual", "Endereço", "Link Google Maps"]
+    headers1 = ["CNPJ", "Razão Social", "Nome Fantasia", "Situação Cadastral", "Regime", "E-mail", "Telefone", "CNAE Principal", "Anexo Simples", "Capital Social", "Inscrição Municipal", "Inscrição Estadual", "Endereço", "Cód. IBGE", "Link Google Maps"]
     ws1.row_dimensions[3].height = 25
     for col_idx, h in enumerate(headers1, 1):
         cell = ws1.cell(row=3, column=col_idx, value=h)
@@ -523,7 +606,7 @@ def gerar_excel_dossie_4abas(lista_empresas):
         vals = [
             emp["cnpj"], emp["razao_social"], emp["nome_fantasia"], emp["situacao"],
             regime_str, emp["email"], emp["telefone"], emp["cnae_principal_str"], emp["diag_principal"]["anexo"],
-            emp["capital_social"], emp["im"], ies_str, end_str, emp["maps_url"]
+            emp["capital_social"], emp["im"], ies_str, end_str, emp["cod_ibge"], emp["maps_url"]
         ]
         for col_idx, val in enumerate(vals, 1):
             cell = ws1.cell(row=row_idx, column=col_idx, value=val)
@@ -631,7 +714,7 @@ def gerar_pdf_dossie_completo(emp):
     pdf.cell(0, 5, tratar_texto_pdf(f"CNPJ: {emp['cnpj']} | Fantasia: {emp['nome_fantasia']}"), ln=True)
     pdf.cell(0, 5, tratar_texto_pdf(f"Contato: Tel {emp['telefone']} | Email: {emp['email']}"), ln=True)
     pdf.cell(0, 5, tratar_texto_pdf(f"Situacao: {emp['situacao']} | Porte: {emp['porte']} | Capital: R$ {emp['capital_social']:,.2f}"), ln=True)
-    pdf.cell(0, 5, tratar_texto_pdf(f"Endereco: {emp['logradouro']}, {emp['numero']} - {emp['bairro']}, {emp['municipio']}/{emp['uf']}"), ln=True)
+    pdf.cell(0, 5, tratar_texto_pdf(f"Endereco: {emp['logradouro']}, {emp['numero']} - {emp['bairro']}, {emp['municipio']}/{emp['uf']} (IBGE: {emp['cod_ibge']})"), ln=True)
     pdf.ln(3)
 
     pdf.set_font("Helvetica", "B", 10)
@@ -739,7 +822,7 @@ def renderizar_paineis_dossie(d):
     
     st.markdown("---")
     st.header(f"🏢 {d['razao_social']}")
-    st.caption(f"CNPJ: {d['cnpj']} | Abertura: {d['data_abertura']} | Tipo: {d['matriz_filial']}")
+    st.caption(f"CNPJ: {d['cnpj']} | Abertura: {d['data_abertura']} | Tipo: {d['matriz_filial']} | Região: {d['regiao_macro']}")
 
     with st.expander("📜 Ver Comprovante de Inscrição e Situação Cadastral (Cartão CNPJ Oficial)"):
         renderizar_cartao_cnpj_html(d)
@@ -816,6 +899,7 @@ def renderizar_paineis_dossie(d):
     col_e1, col_e2 = st.columns(2)
     with col_e1:
         st.write(f"**Endereço Registrado:** {d['logradouro']}, {d['numero']} - {d['bairro']}, {d['municipio']}/{d['uf']} - CEP: {d['cep']}")
+        st.write(f"**Código IBGE:** `{d['cod_ibge']}` | **Macro-região:** `{d['regiao_macro']}`")
         st.markdown(f"[🗺️ Abrir no Google Maps/Street View]({d['maps_url']})")
     with col_e2:
         st.write(f"**E-mail(s):** {d['email']}")
@@ -849,13 +933,13 @@ with aba1:
         if not cnpj_limpo:
             st.error("❌ CNPJ inválido. Digite os 14 números corretamente.")
         else:
-            with st.spinner("Consultando simultaneamente BrasilAPI e CNPJ.ws para cruzar contatos e tributação..."):
+            with st.spinner("Consultando simultaneamente BrasilAPI, CNPJ.ws, ReceitaWS e IBGE..."):
                 dossie = consultar_dossie_completo(cnpj_limpo)
                 
             if dossie:
                 st.session_state.historico = [e for e in st.session_state.historico if e["cnpj"] != cnpj_limpo]
                 st.session_state.historico.insert(0, dossie)
-                st.success("✅ Dossiê gerado com dados cruzados e salvo no CRM com sucesso!")
+                st.success("✅ Dossiê gerado com dados de 4 fontes sincronizadas e salvo no CRM!")
             else:
                 st.error("❌ CNPJ não localizado nas bases públicas.")
 
@@ -1066,6 +1150,10 @@ with aba4:
     st.header("🛠️ Diagnóstico e Simulador de Imposto Retroativo do MEI")
     st.write("Calcule a estimativa de impostos retroativos ($R\$) e guias complementares caso o MEI tenha estourado o limite legal.")
     
+    # Exibição de Indicadores EconômicosOficiais do BACEN
+    selic_v, ipca_v = obter_indicadores_bacen()
+    st.caption(f"🏛️ **Indicadores Macroeconômicos (Banco Central do Brasil em Tempo Real):** Taxa Selic Acumulada: `{selic_v}% a.a.` | IPCA Acumulado: `{ipca_v}% a.a.`")
+
     col_m1, col_m2 = st.columns(2)
     with col_m1:
         fat_mei = st.number_input("Faturamento Acumulado no Ano pelo MEI (R$):", value=92000.0, step=5000.0)
@@ -1085,8 +1173,8 @@ with aba4:
             st.metric("Imposto Retroativo Estimado", f"R$ {diag_mei['imposto_estimado']:,.2f}")
             st.caption("Apurado no Simples Nacional Anexo I")
         with m_col2:
-            st.metric("Encargos de Mora Estimados", f"R$ {diag_mei['encargos_estimados']:,.2f}")
-            st.caption("Projeção de Multa e Juros Selic")
+            st.metric("Encargos de Mora (Selic BACEN)", f"R$ {diag_mei['encargos_estimados']:,.2f}")
+            st.caption(f"Com base na Selic de {diag_mei['selic_usada']}% a.a.")
         with m_col3:
             st.metric("Total Estimado com Encargos", f"R$ {diag_mei['imposto_total_com_encargos']:,.2f}")
             st.caption("Guia PGDAS-D estimada")

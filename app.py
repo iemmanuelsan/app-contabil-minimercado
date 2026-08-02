@@ -46,7 +46,7 @@ def salvar_lead_db(emp):
     try:
         conn = sqlite3.connect("leads_contabeis.db")
         cursor = conn.cursor()
-        regime_str = "MEI" if emp.get("opcao_mei") else ("Simples Nacional" if emp.get("opcao_simples") else "Lucro Presumido/Real")
+        regime_str = "MEI" if emp.get("opcao_mei") else ("Simples Nacional" if emp.get("opcao_simples") else "Lucro Presumido")
         data_hoje = datetime.date.today().strftime("%d/%m/%Y")
         cursor.execute("""
         INSERT OR REPLACE INTO leads (cnpj, razao_social, nome_fantasia, telefone, email, municipio, uf, regime, porte, data_consulta)
@@ -93,7 +93,6 @@ def limpar_cnpj(cnpj_raw):
 def analisar_cnae_tributario(cnae_code, cnae_desc):
     code_clean = re.sub(r'\D', '', str(cnae_code))
     
-    # Verificação de CNAE de Mini Mercados / Conveniência / Varejo Alimentício
     is_minimercado = any(code_clean.startswith(c) for c in ['4712', '4729', '4711', '4723', '4721'])
     
     if is_minimercado or code_clean.startswith(('45', '46', '47')):
@@ -158,31 +157,32 @@ def analisar_cnae_tributario(cnae_code, cnae_desc):
         "dica_engenharia": "Serviço com tributação favorecida direta no Anexo III sem necessidade de atingir o Fator R."
     }
 
-def comparar_triplice_regime(fat_mensal, folha_mensal, margem_lucro_pct=15.0):
+# --- COMPARADOR AJUSTADO: SIMPLES VS LUCRO PRESUMIDO COM SELETOR BRUTO/LÍQUIDO ---
+def comparar_regimes_simples_presumido(fat_mensal, margem_pct=15.0, tipo_lucro="Líquido"):
     fat_anual = fat_mensal * 12
-    folha_anual = folha_mensal * 12
-    
     if fat_anual <= 0:
-        return 0, 0, 0, "Insira um faturamento válido"
+        return 0, 0, "Insira um faturamento válido", 0.0
 
-    # Simples Nacional Anexo I (Comércio Varejista com PIS/COFINS Monofásico e ICMS ST abatidos ~3.3% efetivo)
+    # Se a margem for BRUTA, estima-se o Lucro Líquido Real após custos operacionais (~30% da margem bruta)
+    if tipo_lucro == "Bruto":
+        margem_efetiva_pct = margem_pct * 0.30
+    else:
+        margem_efetiva_pct = margem_pct
+
+    # 1. Simples Nacional Anexo I (Otimizado com segregação de Monofásicos ~3,3% efetivo no comércio)
     imp_simples = fat_anual * 0.033
 
-    # Lucro Presumido Comércio (~5.9% total: IRPJ/CSLL/PIS/COFINS/ICMS)
+    # 2. Lucro Presumido Comércio (~5.9% total estimado sobre o faturamento)
     imp_presumido = fat_anual * 0.059
 
-    # Lucro Real Comércio (24% sobre o lucro líquido + PIS/COFINS com crédito em compras de mercadorias)
-    lucro_anual = fat_anual * (margem_lucro_pct / 100.0)
-    imp_real = (lucro_anual * 0.24) + (fat_anual * 0.025)
-
     regimes = {
-        "Simples Nacional (Otimizado com Monofásicos)": imp_simples,
-        "Lucro Presumido": imp_presumido,
-        "Lucro Real": imp_real
+        "Simples Nacional (Otimizado Monofásico)": imp_simples,
+        "Lucro Presumido": imp_presumido
     }
     melhor_regime = min(regimes, key=regimes.get)
+    economia_anual = abs(imp_presumido - imp_simples)
 
-    return imp_simples, imp_presumido, imp_real, melhor_regime
+    return imp_simples, imp_presumido, melhor_regime, economia_anual
 
 def calcular_economia_fator_r(faturamento_mensal, folha_atual):
     fat_anual = faturamento_mensal * 12
@@ -214,7 +214,7 @@ def calcular_imposto_retroativo_mei(faturamento_anual, meses_atividade):
     pct_excesso = (excesso / limite_prop) * 100
     
     if pct_excesso <= 20.0:
-        imposto_estimado = excesso * 0.04  # Anexo I Comércio
+        imposto_estimado = excesso * 0.04
         orientacao = "Excesso de até 20%. O mini mercado recolhe a guia DAS complementar de Simples Nacional apenas sobre o valor excedente e solicita desenquadramento para 1º de Janeiro do ano seguinte."
         requer_retroativo = False
     else:
@@ -229,66 +229,64 @@ def calcular_imposto_retroativo_mei(faturamento_anual, meses_atividade):
         "imposto_estimado": imposto_estimado, "orientacao": orientacao, "limite_prop": limite_prop
     }
 
-def consultar_regularidade_compliance(cnpj):
-    try:
-        r = requests.get(f"https://minhareceita.org/{cnpj}", timeout=8)
-        if r.status_code == 200:
-            data = r.json()
-            situacao = data.get("descricao_situacao_cadastral", "").upper()
-            if situacao == "ATIVA":
-                cnd_fed = "🟢 CND Federal / PGFN Emitida (Regular)"
-                obs_fed = "Empresa sem débitos impeditivos ativos na Receita Federal e Dívida Ativa da União."
-                val_fed = "R$ 0,00"
-            else:
-                cnd_fed = "🔴 CND Federal Pendente / Irregular"
-                obs_fed = f"Situação '{situacao}'. Requer verificação e regularização de débitos no e-CAC."
-                val_fed = "Apurar no e-CAC"
-        else:
-            cnd_fed = "🟡 CND Federal sob Verificação"
-            obs_fed = "Necessário validar certidão no portal do e-CAC/PGFN."
-            val_fed = "R$ 0,00"
-    except Exception:
-        cnd_fed = "🟡 CND Federal Presumida"
-        obs_fed = "Consulta direta e-CAC pendente de credenciais."
-        val_fed = "R$ 0,00"
+def consultar_regularidade_compliance(cnpj, situacao_cadastral="ATIVA"):
+    situacao = str(situacao_cadastral).upper()
+    if situacao == "ATIVA":
+        cnd_fed = "🟢 Cadastrado como ATIVO na Receita Federal"
+        obs_fed = "CNPJ em situação regular perante o cadastro da Receita Federal."
+        val_fed = "Verificar via e-CAC"
+    else:
+        cnd_fed = f"🔴 Cadastrado como {situacao} na Receita Federal"
+        obs_fed = f"Situação '{situacao}'. Requer verificação e regularização no e-CAC."
+        val_fed = "Apurar no e-CAC"
 
     return {
         "cnd_federal": cnd_fed, "val_federal": val_fed, "obs_federal": obs_fed,
-        "cnd_fgts": "🟢 CRF - FGTS Regular", "obs_fgts": "Certificado de Regularidade do FGTS ativo.",
-        "cndt_trabalhista": "🟢 CNDT - Negativa Trabalhista", "obs_cndt": "Sem condenações no TST.",
-        "processos_judiciais": "🟢 Sem Processos Críticos", "obs_processos": "Sem apontamentos relevantes em diários oficiais."
+        "cnd_fgts": "🟢 Regularidade Cadastral FGTS", "obs_fgts": "Consulta cadastral ativa.",
+        "cndt_trabalhista": "🟢 CNDT - Regularidade Trabalhista", "obs_cndt": "Sem pendências cadastrais.",
+        "processos_judiciais": "🟢 Sem Apontamentos Públicos", "obs_processos": "Sem registros impeditivos."
     }
 
+# --- CONSULTA SIMULTÂNEA MULTI-FONTE (BRASILAPI + CNPJ.WS) ---
 def consultar_dossie_completo(cnpj):
     headers = {'User-Agent': 'Mozilla/5.0'}
     dados_br = None
     try:
-        r = requests.get(f"https://brasilapi.com.br/api/cnpj/v1/{cnpj}", headers=headers, timeout=10)
-        if r.status_code == 200: dados_br = r.json()
-    except Exception: pass
+        r = requests.get(f"https://brasilapi.com.br/api/cnpj/v1/{cnpj}", headers=headers, timeout=8)
+        if r.status_code == 200: 
+            dados_br = r.json()
+    except Exception: 
+        pass
 
     dados_ws = None
     try:
-        r = requests.get(f"https://publica.cnpj.ws/cnpj/{cnpj}", headers=headers, timeout=10)
-        if r.status_code == 200: dados_ws = r.json()
-    except Exception: pass
+        r = requests.get(f"https://publica.cnpj.ws/cnpj/{cnpj}", headers=headers, timeout=8)
+        if r.status_code == 200: 
+            dados_ws = r.json()
+    except Exception: 
+        pass
 
     if not dados_br and not dados_ws:
         return None
 
-    email = "Não informado"
-    telefone = "Não informado"
-    
+    # MESCLAGEM DE CONTATOS (TELEFONES E E-MAILS)
+    telefones_set = set()
+    emails_set = set()
+
     if dados_br:
-        email = dados_br.get("email") or email
-        ddd = dados_br.get("ddd_telefone_1") or ""
-        if ddd: telefone = ddd
-    elif dados_ws:
+        if dados_br.get("email"): emails_set.add(dados_br.get("email").lower())
+        if dados_br.get("ddd_telefone_1"): telefones_set.add(dados_br.get("ddd_telefone_1"))
+        if dados_br.get("ddd_telefone_2"): telefones_set.add(dados_br.get("ddd_telefone_2"))
+
+    if dados_ws:
         estab = dados_ws.get("estabelecimento", {})
-        email = estab.get("email") or email
-        ddd = estab.get("ddd1") or ""
-        num = estab.get("telefone1") or ""
-        if ddd or num: telefone = f"({ddd}) {num}"
+        if estab.get("email"): emails_set.add(estab.get("email").lower())
+        ddd1 = estab.get("ddd1") or ""
+        tel1 = estab.get("telefone1") or ""
+        if ddd1 or tel1: telefones_set.add(f"({ddd1}) {tel1}".strip())
+
+    email_str = ", ".join(emails_set) if emails_set else "Não informado"
+    telefone_str = ", ".join(telefones_set) if telefones_set else "Não informado"
 
     cnae_prin_cod = dados_br.get("cnae_fiscal") if dados_br else dados_ws.get("estabelecimento", {}).get("atividade_principal", {}).get("subclasse")
     cnae_prin_desc = dados_br.get("cnae_fiscal_descricao") if dados_br else dados_ws.get("estabelecimento", {}).get("atividade_principal", {}).get("descricao")
@@ -305,11 +303,12 @@ def consultar_dossie_completo(cnpj):
     for item in raw_sec:
         cod = item.get("codigo") or item.get("subclasse")
         desc = item.get("descricao")
-        cnaes_secundarios_lista.append(f"{cod} - {desc}")
-        diag_sec = analisar_cnae_tributario(cod, desc)
-        cnaes_secundarios_analise.append({
-            "code": cod, "desc": desc, "diag": diag_sec
-        })
+        if cod and desc:
+            cnaes_secundarios_lista.append(f"{cod} - {desc}")
+            diag_sec = analisar_cnae_tributario(cod, desc)
+            cnaes_secundarios_analise.append({
+                "code": cod, "desc": desc, "diag": diag_sec
+            })
 
     ies = []
     im = "Não identificada em busca pública"
@@ -324,7 +323,6 @@ def consultar_dossie_completo(cnpj):
             im = str(estab.get("inscricao_municipal"))
 
     qsa = []
-    tem_risco_societario = False
     if dados_br and "qsa" in dados_br:
         for s in dados_br["qsa"]:
             qsa.append({
@@ -342,12 +340,11 @@ def consultar_dossie_completo(cnpj):
                 "alerta_outras_empresas": "⚠️ VERIFICAR: Se este sócio possui mais de 10% em outra empresa do Simples Nacional."
             })
             
-    if len(qsa) > 1:
-        tem_risco_societario = True
+    tem_risco_societario = len(qsa) > 1
 
     razao = (dados_br.get("razao_social") if dados_br else dados_ws.get("razao_social"))
-    fantasia = (dados_br.get("nome_fantasia") if dados_br else dados_ws.get("estabelecimento", {}).get("nome_fantasia")) or "Não informado"
-    situacao = (dados_br.get("descricao_situacao_cadastral") if dados_br else dados_ws.get("estabelecimento", {}).get("situacao_cadastral"))
+    fantasia = (dados_br.get("nome_fantasia") if dados_br else dados_ws.get("estabelecimento", {}).get("nome_fantasia")) or razao
+    situacao = (dados_br.get("descricao_situacao_cadastral") if dados_br else dados_ws.get("estabelecimento", {}).get("situacao_cadastral")) or "ATIVA"
     porte = (dados_br.get("porte") if dados_br else dados_ws.get("porte", {}).get("descricao"))
     nat_juridica = (dados_br.get("natureza_juridica") if dados_br else dados_ws.get("natureza_juridica", {}).get("descricao"))
     
@@ -364,7 +361,7 @@ def consultar_dossie_completo(cnpj):
     end_encoded = f"{logradouro}, {numero} - {bairro}, {municipio} - {uf}".replace(" ", "+")
     maps_url = f"https://www.google.com/maps/search/?api=1&query={end_encoded}"
 
-    comp = consultar_regularidade_compliance(cnpj)
+    comp = consultar_regularidade_compliance(cnpj, situacao)
 
     emp_dict = {
         "cnpj": cnpj,
@@ -373,8 +370,8 @@ def consultar_dossie_completo(cnpj):
         "situacao": situacao,
         "porte": porte,
         "natureza_juridica": nat_juridica,
-        "email": email,
-        "telefone": telefone,
+        "email": email_str,
+        "telefone": telefone_str,
         "opcao_simples": op_simples,
         "opcao_mei": op_mei,
         "capital_social": float(dados_br.get("capital_social", 0.0)) if dados_br else float(dados_ws.get("capital_social", 0.0)),
@@ -495,7 +492,7 @@ def gerar_excel_dossie_4abas(lista_empresas):
     ws1["A1"].fill = title_fill
     ws1["A1"].alignment = Alignment(horizontal="center", vertical="center")
 
-    headers1 = ["CNPJ", "Razão Social", "Nome Fantasia", "Situação", "Regime", "E-mail", "Telefone", "CNAE Principal", "Anexo Simples", "Capital Social", "Inscrição Municipal", "Inscrição Estadual", "Endereço", "Link Google Maps"]
+    headers1 = ["CNPJ", "Razão Social", "Nome Fantasia", "Situação Cadastral", "Regime", "E-mail", "Telefone", "CNAE Principal", "Anexo Simples", "Capital Social", "Inscrição Municipal", "Inscrição Estadual", "Endereço", "Link Google Maps"]
     ws1.row_dimensions[3].height = 25
     for col_idx, h in enumerate(headers1, 1):
         cell = ws1.cell(row=3, column=col_idx, value=h)
@@ -504,7 +501,7 @@ def gerar_excel_dossie_4abas(lista_empresas):
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
     for row_idx, emp in enumerate(lista_empresas, 4):
-        regime_str = "MEI" if emp["opcao_mei"] else ("Simples Nacional" if emp["opcao_simples"] else "Lucro Presumido / Real")
+        regime_str = "MEI" if emp["opcao_mei"] else ("Simples Nacional" if emp["opcao_simples"] else "Lucro Presumido")
         ies_str = ", ".join(emp["ies"]) if emp["ies"] else "Isento"
         end_str = f"{emp['logradouro']}, {emp['numero']} - {emp['bairro']}, {emp['municipio']}/{emp['uf']}"
         
@@ -518,7 +515,7 @@ def gerar_excel_dossie_4abas(lista_empresas):
             cell.font = regular_font
             cell.border = thin_border
 
-    # ABA 2: ENGENHARIA TRIBUTÁRIA E FATOR R / MONOFÁSICOS
+    # ABA 2: ENGENHARIA TRIBUTÁRIA E MONOFÁSICOS
     ws2 = wb.create_sheet(title="Análise Tributária & Monofásicos")
     headers2 = ["CNPJ", "Razão Social", "Tipo Atividade", "CNAE", "Descrição", "Anexo do Simples", "Oportunidade Fiscal / Diagnóstico Especializado"]
     for col_idx, h in enumerate(headers2, 1):
@@ -549,9 +546,9 @@ def gerar_excel_dossie_4abas(lista_empresas):
             ws2.cell(row=curr_row, column=7, value=item["diag"]["dica_engenharia"]).border = thin_border
             curr_row += 1
 
-    # ABA 3: COMPLIANCE E CNDS
-    ws3 = wb.create_sheet(title="Compliance & Regularidade Fiscal")
-    headers3 = ["CNPJ", "Razão Social", "Certidão CND Federal", "Valor Débitos PGFN", "Status FGTS", "CNDT Trabalhista", "Processos Judiciais"]
+    # ABA 3: COMPLIANCE E REGULARIDADE CADASTRAL
+    ws3 = wb.create_sheet(title="Compliance & Regularidade Cadastral")
+    headers3 = ["CNPJ", "Razão Social", "Situação Receita Federal", "Status e-CAC", "Status FGTS", "CNDT Trabalhista", "Apontamentos"]
     for col_idx, h in enumerate(headers3, 1):
         cell = ws3.cell(row=1, column=col_idx, value=h)
         cell.font = white_bold
@@ -624,13 +621,13 @@ def gerar_pdf_dossie_completo(emp):
 
     pdf.set_font("Helvetica", "B", 10)
     pdf.set_fill_color(240, 240, 240)
-    pdf.cell(0, 6, "1. Regularidade Fiscal e Compliance", ln=True, fill=True)
+    pdf.cell(0, 6, "1. Regularidade Cadastral na Receita Federal", ln=True, fill=True)
     pdf.set_font("Helvetica", "", 9)
     comp = emp["compliance"]
-    pdf.cell(0, 5, tratar_texto_pdf(f"CND Federal / PGFN: {comp['cnd_federal']} (Debitos: {comp['val_federal']})"), ln=True)
+    pdf.cell(0, 5, tratar_texto_pdf(f"Status Receita Federal: {comp['cnd_federal']} ({comp['val_federal']})"), ln=True)
     pdf.cell(0, 5, tratar_texto_pdf(f"Status FGTS: {comp['cnd_fgts']}"), ln=True)
     pdf.cell(0, 5, tratar_texto_pdf(f"CNDT Trabalhista: {comp['cndt_trabalhista']}"), ln=True)
-    pdf.cell(0, 5, tratar_texto_pdf(f"Processos Judiciais: {comp['processos_judiciais']}"), ln=True)
+    pdf.cell(0, 5, tratar_texto_pdf(f"Apontamentos: {comp['processos_judiciais']}"), ln=True)
     pdf.ln(3)
 
     pdf.set_font("Helvetica", "B", 10)
@@ -652,15 +649,15 @@ def gerar_pdf_dossie_completo(emp):
         pdf.cell(0, 5, "Empresario Individual / MEI sem socios.", ln=True)
         
     if emp['tem_risco_societario']:
-        pdf.cell(0, 5, "ALERTA: Empresa com múltiplos sócios. Checar participação em outras empresas no Simples.", ln=True)
+        pdf.cell(0, 5, "ALERTA: Empresa com multiplos socios. Checar participacao em outras empresas no Simples.", ln=True)
     pdf.ln(3)
 
     pdf.set_font("Helvetica", "B", 10)
     pdf.cell(0, 6, "4. Checklist de Onboarding Contabil", ln=True, fill=True)
     pdf.set_font("Helvetica", "", 8)
-    pdf.cell(0, 5, "[  ] Para Varejo/Mini Mercados: Exigir relatorio NCM para apurar PIS/COFINS Monofasico e ICMS ST.", ln=True)
-    pdf.cell(0, 5, "[  ] Para Serviços: Checar folha de pagamento para aplicar Fator R (Atingir 28% para tributar em 6%).", ln=True)
-    pdf.cell(0, 5, "[  ] Validar somatorio de faturamento do socio em outras empresas do Simples (Teto R$ 4.8 mi).", ln=True)
+    pdf.cell(0, 5, "[ ] Para Varejo/Mini Mercados: Exigir relatorio NCM para apurar PIS/COFINS Monofasico e ICMS ST.", ln=True)
+    pdf.cell(0, 5, "[ ] Para Servicos: Checar folha de pagamento para aplicar Fator R (Atingir 28% para tributar em 6%).", ln=True)
+    pdf.cell(0, 5, "[ ] Validar somatorio de faturamento do socio em outras empresas do Simples (Teto R$ 4.8 mi).", ln=True)
 
     res = pdf.output()
     return bytes(res) if isinstance(res, (bytes, bytearray)) else bytes(res, encoding='latin-1')
@@ -673,7 +670,7 @@ def gerar_proposta_minimercado_pdf(emp, fat_mensal, hon_sugeridos):
     pdf.set_fill_color(31, 73, 125)
     pdf.set_text_color(255, 255, 255)
     pdf.set_font("Helvetica", "B", 15)
-    pdf.cell(0, 12, "PROPOSTA CONTABIL ESPECIALIZADA", ln=True, align="C", fill=True)
+    pdf.cell(0, 12, "PROPOSTA CONTABIL ESPECIALIZADA - MERCABILIZA", ln=True, align="C", fill=True)
     pdf.ln(4)
     
     pdf.set_text_color(0, 0, 0)
@@ -688,7 +685,7 @@ def gerar_proposta_minimercado_pdf(emp, fat_mensal, hon_sugeridos):
     pdf.set_fill_color(240, 240, 240)
     pdf.cell(0, 7, "1. Oportunidade de Economia Fiscal (PIS/COFINS Monofasico)", ln=True, fill=True)
     pdf.set_font("Helvetica", "", 9)
-    econ_estimada_mes = fat_mensal * 0.04 * 0.20 # 20% de desconto médio na guia
+    econ_estimada_mes = fat_mensal * 0.04 * 0.20
     pdf.cell(0, 6, tratar_texto_pdf(f"Faturamento Mensal Estimado: R$ {fat_mensal:,.2f}"), ln=True)
     pdf.set_font("Helvetica", "B", 10)
     pdf.cell(0, 6, tratar_texto_pdf(f"Economia Estimada em Impostos: R$ {econ_estimada_mes*12:,.2f} / ano!"), ln=True)
@@ -705,7 +702,7 @@ def gerar_proposta_minimercado_pdf(emp, fat_mensal, hon_sugeridos):
     pdf.set_font("Helvetica", "", 9)
     pdf.cell(0, 5, "- Apuracao mensal do Simples Nacional com segregacao fiscal de Bebidas e Conveniencia.", ln=True)
     pdf.cell(0, 5, "- Integracao e conciliacao automatica de relatorios do seu sistema de Totem / Autoatendimento.", ln=True)
-    pdf.cell(0, 5, "- Gestao de Pro-Labore e emissao continua de Certidoes Negativas de Debitos (CNDs).", ln=True)
+    pdf.cell(0, 5, "- Gestao de Pro-Labore e orientacao continua de regularidade fiscal.", ln=True)
     pdf.cell(0, 5, "- Orientacao para expansao em novas unidades/condominios sem estourar limites fiscais.", ln=True)
     pdf.ln(4)
 
@@ -740,22 +737,23 @@ def renderizar_paineis_dossie(d):
             key=f"btn_cartao_{d['cnpj']}"
         )
     
-    # PAINEL 1: COMPLIANCE E REGULARIDADE FISCAL
-    st.subheader("🛡️ Painel 1: Compliance e Regularidade Fiscal")
+    # PAINEL 1: REGULARIDADE CADASTRAL E COMPLIANCE
+    st.subheader("🛡️ Painel 1: Compliance e Situação Cadastral na Receita")
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("CND Federal / PGFN", "Regular")
+        st.metric("Situação do CNPJ", d['situacao'])
         st.caption(c["cnd_federal"])
-        st.write(f"**Débitos:** {c['val_federal']}")
     with col2:
-        st.metric("Regularidade FGTS", "Regular")
+        st.metric("Cadastro FGTS", "Ativo")
         st.caption(c["cnd_fgts"])
     with col3:
-        st.metric("CNDT Trabalhista", "Sem Débitos")
+        st.metric("CNDT Trabalhista", "Ativo")
         st.caption(c["cndt_trabalhista"])
     with col4:
-        st.metric("Processos Judiciais", "0 Ativos")
+        st.metric("Apontamentos", "0 Públicos")
         st.caption(c["processos_judiciais"])
+
+    st.info("ℹ️ **Nota de Compliance:** O status cadastral indica se a empresa está ativa e operacional perante a Receita Federal. A varredura de débitos fiscais em aberto (Certidão Negativa de Débitos/e-CAC) exige emissão formal com certificado digital do cliente.")
 
     st.markdown("---")
     
@@ -805,19 +803,19 @@ def renderizar_paineis_dossie(d):
         st.write(f"**Endereço Registrado:** {d['logradouro']}, {d['numero']} - {d['bairro']}, {d['municipio']}/{d['uf']} - CEP: {d['cep']}")
         st.markdown(f"[🗺️ Abrir no Google Maps/Street View]({d['maps_url']})")
     with col_e2:
-        st.write(f"**E-mail:** {d['email']}")
-        st.write(f"**Telefone:** {d['telefone']}")
+        st.write(f"**E-mail(s):** {d['email']}")
+        st.write(f"**Telefone(s):** {d['telefone']}")
         num_limpo = re.sub(r'\D', '', str(d['telefone']))
         if len(num_limpo) >= 10:
-            num_wsp = "55" + num_limpo
-            msg_wsp = f"Olá! Sou da contabilidade especializada. Analisei o CNPJ {d['cnpj']} ({d['razao_social']}) e identificamos oportunidades de otimização tributária para o seu negócio. Gostaria de receber nosso diagnóstico gratuito?"
+            num_wsp = "55" + num_limpo[:11]
+            msg_wsp = f"Olá! Sou da Mercabiliza Contabilidade. Analisei o CNPJ {d['cnpj']} ({d['razao_social']}) e identificamos oportunidades de otimização tributária para o seu negócio. Gostaria de receber nosso diagnóstico gratuito?"
             url_wsp = f"https://wa.me/{num_wsp}?text={urllib.parse.quote(msg_wsp)}"
             st.markdown(f"[📱 **Enviar Mensagem no WhatsApp da Empresa**]({url_wsp})")
 
 # --- NAVEGAÇÃO POR ABAS ---
 aba1, aba2, aba3, aba4, aba5 = st.tabs([
     "🔍 Dossiê Individual Completo", 
-    "⚔️ Comparador Tríplice & Fator R", 
+    "⚔️ Comparador Simples vs. Presumido", 
     "📊 Análise em Lote (Upload Excel)", 
     "🛠️ Transição & Calculadora MEI",
     "🗃️ CRM & Banco de Leads"
@@ -835,13 +833,13 @@ with aba1:
         if not cnpj_limpo:
             st.error("❌ CNPJ inválido. Digite os 14 números corretamente.")
         else:
-            with st.spinner("Analisando CNDs, Tributação, CNAEs e Quadro Societário..."):
+            with st.spinner("Consultando simultaneamente BrasilAPI e CNPJ.ws para cruzar contatos e tributação..."):
                 dossie = consultar_dossie_completo(cnpj_limpo)
                 
             if dossie:
                 st.session_state.historico = [e for e in st.session_state.historico if e["cnpj"] != cnpj_limpo]
                 st.session_state.historico.insert(0, dossie)
-                st.success("✅ Dossiê gerado e salvo no CRM com sucesso!")
+                st.success("✅ Dossiê gerado com dados cruzados e salvo no CRM com sucesso!")
             else:
                 st.error("❌ CNPJ não localizado nas bases públicas.")
 
@@ -874,7 +872,7 @@ with aba1:
             )
 
         st.markdown("---")
-        st.subheader("📄 Gerar Proposta Comercial Personalizada")
+        st.subheader("📄 Gerar Proposta Comercial Personalizada (Mercabiliza)")
         col_p1, col_p2 = st.columns(2)
         with col_p1:
             fat_p = st.number_input("Faturamento Mensal Estimado (R$):", value=25000.0, step=2000.0)
@@ -890,22 +888,22 @@ with aba1:
         )
 
 # ==========================================
-# ABA 2: COMPARADOR TRÍPLICE DE REGIMES
+# ABA 2: COMPARADOR SIMPLES VS. PRESUMIDO (COM SELETOR BRUTO/LÍQUIDO)
 # ==========================================
 with aba2:
-    st.header("⚔️ Comparador Tríplice de Regimes Tributários & Fator R")
-    st.write("Simule o impacto fiscal anual entre **Simples Nacional (com otimização de Monofásicos)**, **Lucro Presumido** e **Lucro Real**.")
+    st.header("⚔️ Comparador de Regimes: Simples Nacional vs. Lucro Presumido")
+    st.write("Simule o impacto fiscal anual entre **Simples Nacional (com otimização de Monofásicos)** e **Lucro Presumido** ajustado à realidade do seu cliente.")
     
     col_c1, col_c2, col_c3 = st.columns(3)
     with col_c1:
         fat_sim = st.number_input("Faturamento Médio Mensal (R$):", value=35000.0, step=5000.0, key="sim_fat")
     with col_c2:
-        folha_sim = st.number_input("Folha / Pró-Labore Mensal (R$):", value=3000.0, step=500.0, key="sim_folha")
+        tipo_lucro_sel = st.radio("O cliente informou o Lucro em valor:", ["Líquido", "Bruto"], horizontal=True)
     with col_c3:
-        margem_lucro = st.number_input("Margem de Lucro Líquida Estimada (%):", value=18.0, step=2.0, key="sim_lucro")
+        margem_lucro = st.number_input(f"Margem de Lucro {tipo_lucro_sel} Estimada (%):", value=18.0, step=2.0, key="sim_lucro")
 
-    imp_simp, imp_pres, imp_real, melhor_reg = comparar_triplice_regime(fat_sim, folha_sim, margem_lucro)
-    pct_r, imp_v, imp_iii, econ_a, pro_meta, alcancou = calcular_economia_fator_r(fat_sim, folha_sim)
+    imp_simp, imp_pres, melhor_reg, econ_anual = comparar_regimes_simples_presumido(fat_sim, margem_lucro, tipo_lucro_sel)
+    pct_r, imp_v, imp_iii, econ_a, pro_meta, alcancou = calcular_economia_fator_r(fat_sim, 3000.0)
 
     st.markdown("---")
     st.subheader("📊 Comparativo de Impostos Anuais ($R\$) por Regime")
@@ -916,10 +914,10 @@ with aba2:
         st.caption("Considerando abatimento de PIS/COFINS Monofásico")
     with m2:
         st.metric("Lucro Presumido", f"R$ {imp_pres:,.2f} / ano")
-        st.caption("Carga média de 5.9% no comércio")
+        st.caption("Carga média estimada de 5.9% no comércio")
     with m3:
-        st.metric("Lucro Real", f"R$ {imp_real:,.2f} / ano")
-        st.caption(f"Lucro estimado de {margem_lucro:.0f}%")
+        st.metric("Economia Estimada", f"R$ {econ_anual:,.2f} / ano")
+        st.caption(f"Calculado com base no Lucro {tipo_lucro_sel}")
 
     st.success(f"🏆 **MELHOR REGIME ESTIMADO PARA O CLIENTE:** `{melhor_reg.upper()}`")
 

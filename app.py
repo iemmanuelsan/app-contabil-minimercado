@@ -92,37 +92,31 @@ def limpar_cnpj(cnpj_raw):
 # --- INTEGRAÇÃO: API DO BANCO CENTRAL DO BRASIL (SGS) ---
 @st.cache_data(ttl=86400)
 def obter_indicadores_bacen():
-    """Consulta indicadores Selic e IPCA em tempo real do Banco Central do Brasil."""
     headers = {'User-Agent': 'Mozilla/5.0'}
-    selic_ano = 10.50  # Fallback
-    ipca_ano = 4.00   # Fallback
+    selic_ano = 10.50
+    ipca_ano = 4.00
     
     try:
-        # Série 4390: Selic acumulada no mês
         r_selic = requests.get("https://api.bcb.gov.br/dados/serie/bcdata.sgs.4390/dados/ultimos/12?formato=json", headers=headers, timeout=5)
         if r_selic.status_code == 200:
             dados = r_selic.json()
             soma = sum(float(item["valor"]) for item in dados if "valor" in item)
             if soma > 0: selic_ano = soma
-    except Exception:
-        pass
+    except Exception: pass
 
     try:
-        # Série 10844: IPCA mensal
         r_ipca = requests.get("https://api.bcb.gov.br/dados/serie/bcdata.sgs.10844/dados/ultimos/12?formato=json", headers=headers, timeout=5)
         if r_ipca.status_code == 200:
             dados = r_ipca.json()
             soma = sum(float(item["valor"]) for item in dados if "valor" in item)
             if soma > 0: ipca_ano = soma
-    except Exception:
-        pass
+    except Exception: pass
 
     return round(selic_ano, 2), round(ipca_ano, 2)
 
 # --- INTEGRAÇÃO: API DO IBGE (LOCALIDADES) ---
 @st.cache_data(ttl=604800)
 def consultar_dados_ibge_municipio(nome_municipio, uf):
-    """Obtém o código do IBGE e região a partir da API oficial do IBGE."""
     if not nome_municipio or not uf:
         return {"cod_ibge": "N/A", "regiao": "N/A"}
     
@@ -137,15 +131,13 @@ def consultar_dados_ibge_municipio(nome_municipio, uf):
                     cod_ibge = str(m.get("id", "N/A"))
                     regiao = m.get("microrregiao", {}).get("mesorregiao", {}).get("UF", {}).get("regiao", {}).get("nome", "Brasil")
                     return {"cod_ibge": cod_ibge, "regiao": regiao}
-    except Exception:
-        pass
+    except Exception: pass
         
     return {"cod_ibge": "N/A", "regiao": "Brasil"}
 
 # --- MOTOR DE INTELIGÊNCIA TRIBUTÁRIA E ENGENHARIA FISCAL ---
 def analisar_cnae_tributario(cnae_code, cnae_desc):
     code_clean = re.sub(r'\D', '', str(cnae_code))
-    
     is_minimercado = any(code_clean.startswith(c) for c in ['4712', '4729', '4711', '4723', '4721'])
     
     if is_minimercado or code_clean.startswith(('45', '46', '47')):
@@ -210,7 +202,6 @@ def analisar_cnae_tributario(cnae_code, cnae_desc):
         "dica_engenharia": "Serviço com tributação favorecida direta no Anexo III sem necessidade de atingir o Fator R."
     }
 
-# --- COMPARADOR AJUSTADO: SIMPLES VS LUCRO PRESUMIDO COM SELETOR BRUTO/LÍQUIDO ---
 def comparar_regimes_simples_presumido(fat_mensal, margem_pct=15.0, tipo_lucro="Líquido"):
     fat_anual = fat_mensal * 12
     if fat_anual <= 0:
@@ -233,7 +224,6 @@ def comparar_regimes_simples_presumido(fat_mensal, margem_pct=15.0, tipo_lucro="
 
     return imp_simples, imp_presumido, melhor_regime, economia_anual
 
-# --- CÁLCULO RETROATIVO DO MEI COM TAXA SELIC DO BACEN EM TEMPO REAL ---
 def calcular_imposto_retroativo_mei(faturamento_anual, meses_atividade, pct_monofasico=55.0):
     limite_prop = meses_atividade * 6750.0
     selic_real, ipca_real = obter_indicadores_bacen()
@@ -253,7 +243,6 @@ def calcular_imposto_retroativo_mei(faturamento_anual, meses_atividade, pct_mono
     excesso = faturamento_anual - limite_prop
     pct_excesso = (excesso / limite_prop) * 100
     
-    # 1. Alíquota Efetiva do Anexo I do Simples Nacional (Comércio)
     if faturamento_anual <= 180000.0:
         aliquota_base = 0.040
     elif faturamento_anual <= 360000.0:
@@ -261,11 +250,9 @@ def calcular_imposto_retroativo_mei(faturamento_anual, meses_atividade, pct_mono
     else:
         aliquota_base = (faturamento_anual * 0.095 - 13860.0) / faturamento_anual
 
-    # Abatimento proporcional de PIS/COFINS Monofásico na guia do DAS
     fator_desconto_monofasico = 1.0 - ((pct_monofasico / 100.0) * 0.30)
     aliquota_efetiva = aliquota_base * fator_desconto_monofasico
 
-    # 2. Cenários de Excesso
     if pct_excesso <= 20.0:
         imposto_bruto = excesso * aliquota_efetiva
         requer_retroativo = False
@@ -284,7 +271,6 @@ def calcular_imposto_retroativo_mei(faturamento_anual, meses_atividade, pct_mono
             "Todas as vendas do ano serão apuradas no PGDAS-D com compensação das guias DAS-MEI fixas já pagas."
         )
 
-    # 3. Estimativa de Encargos com base na Selic Oficial do BACEN (Multa 10% + Selic em tempo real)
     taxa_mora = (selic_real / 100.0) if requer_retroativo else 0.0
     encargos_estimados = imposto_bruto * (0.10 + taxa_mora) if requer_retroativo else 0.0
     imposto_total_final = imposto_bruto + encargos_estimados
@@ -319,25 +305,21 @@ def consultar_regularidade_compliance(cnpj, situacao_cadastral="ATIVA"):
         "processos_judiciais": "🟢 Sem Apontamentos Públicos", "obs_processos": "Sem registros impeditivos."
     }
 
-# --- CONSULTA SIMULTÂNEA TRIPLA-FONTE (BRASILAPI + CNPJ.WS + RECEITAWS) ---
 def consultar_dossie_completo(cnpj):
     headers = {'User-Agent': 'Mozilla/5.0'}
     
-    # FONTE 1: BrasilAPI
     dados_br = None
     try:
         r = requests.get(f"https://brasilapi.com.br/api/cnpj/v1/{cnpj}", headers=headers, timeout=8)
         if r.status_code == 200: dados_br = r.json()
     except Exception: pass
 
-    # FONTE 2: CNPJ.ws
     dados_ws = None
     try:
         r = requests.get(f"https://publica.cnpj.ws/cnpj/{cnpj}", headers=headers, timeout=8)
         if r.status_code == 200: dados_ws = r.json()
     except Exception: pass
 
-    # FONTE 3: ReceitaWS (3ª fonte de redundância)
     dados_rws = None
     try:
         r = requests.get(f"https://receitaws.com.br/v1/cnpj/{cnpj}", headers=headers, timeout=8)
@@ -347,7 +329,6 @@ def consultar_dossie_completo(cnpj):
     if not dados_br and not dados_ws and not dados_rws:
         return None
 
-    # MESCLAGEM TRIPLA DE CONTATOS (TELEFONES E E-MAILS)
     telefones_set = set()
     emails_set = set()
 
@@ -452,7 +433,6 @@ def consultar_dossie_completo(cnpj):
     uf = (dados_br.get("uf") if dados_br else None) or (dados_ws.get("estabelecimento", {}).get("estado", {}).get("sigla") if dados_ws else None) or dados_rws.get("uf")
     cep = (dados_br.get("cep") if dados_br else None) or (dados_ws.get("estabelecimento", {}).get("cep") if dados_ws else None) or dados_rws.get("cep")
 
-    # ENRIQUECIMENTO DE DADOS COM API DO IBGE
     dados_ibge = consultar_dados_ibge_municipio(municipio, uf)
 
     end_encoded = f"{logradouro}, {numero} - {bairro}, {municipio} - {uf}".replace(" ", "+")
@@ -760,57 +740,117 @@ def gerar_pdf_dossie_completo(emp):
     res = pdf.output()
     return bytes(res) if isinstance(res, (bytes, bytearray)) else bytes(res, encoding='latin-1')
 
-# --- PROPOSTA COMERCIAL EM PDF ---
-def gerar_proposta_minimercado_pdf(emp, fat_mensal, hon_sugeridos):
+# --- GERADOR DE PROPOSTA COMERCIAL EM PDF (MODELO FIEL MERCABILIZA) ---
+def gerar_proposta_minimercado_pdf(emp, incluir_desenq, incluir_abertura, num_cnpjs, num_pessoas):
     pdf = FPDF()
     pdf.add_page()
     
-    pdf.set_fill_color(31, 73, 125)
+    # Cabeçalho Mercabiliza
+    pdf.set_fill_color(220, 50, 80) # Tom vermelho/rosa institucional Mercabiliza
+    pdf.rect(0, 0, 210, 12, 'F')
     pdf.set_text_color(255, 255, 255)
-    pdf.set_font("Helvetica", "B", 15)
-    pdf.cell(0, 12, "PROPOSTA CONTABIL ESPECIALIZADA - MERCABILIZA", ln=True, align="C", fill=True)
-    pdf.ln(4)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 6, "MERCABILIZA - CONTABILIDADE PARA MINIMERCADOS", ln=True, align="C")
+    pdf.ln(8)
     
+    # Título da Proposta
     pdf.set_text_color(0, 0, 0)
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 6, tratar_texto_pdf(f"Empresa: {emp['razao_social']}"), ln=True)
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, "PROPOSTA DE PRESTACAO DE SERVICOS CONTABEIS", ln=True, align="L")
     pdf.set_font("Helvetica", "", 9)
-    pdf.cell(0, 5, tratar_texto_pdf(f"CNPJ: {emp['cnpj']} | Cidade/UF: {emp['municipio']}/{emp['uf']}"), ln=True)
-    pdf.cell(0, 5, tratar_texto_pdf(f"Contato: {emp['telefone']} | E-mail: {emp['email']}"), ln=True)
-    pdf.ln(3)
+    pdf.cell(0, 5, tratar_texto_pdf(f"Cliente: {emp['razao_social']} | CNPJ: {emp['cnpj']}"), ln=True)
+    pdf.cell(0, 5, tratar_texto_pdf(f"Cidade/UF: {emp['municipio']}/{emp['uf']} | Contato: {emp['telefone']}"), ln=True)
+    pdf.ln(4)
 
+    # Texto Institucional (Fiel aos PDFs originais)
     pdf.set_font("Helvetica", "B", 10)
     pdf.set_fill_color(240, 240, 240)
-    pdf.cell(0, 7, "1. Oportunidade de Economia Fiscal (PIS/COFINS Monofasico)", ln=True, fill=True)
-    pdf.set_font("Helvetica", "", 9)
-    econ_estimada_mes = fat_mensal * 0.04 * 0.20
-    pdf.cell(0, 6, tratar_texto_pdf(f"Faturamento Mensal Estimado: R$ {fat_mensal:,.2f}"), ln=True)
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(0, 6, tratar_texto_pdf(f"Economia Estimada em Impostos: R$ {econ_estimada_mes*12:,.2f} / ano!"), ln=True)
-    pdf.set_font("Helvetica", "", 9)
-    pdf.multi_cell(0, 5, tratar_texto_pdf(
-        "Como a sua operacao vende bebidas (cervejas, refrigerantes, agua) e doces/snacks, "
-        "revisamos o seu faturamento para excluir o PIS e COFINS Monofasico ja recolhidos na fabrica, "
-        "evitando que voce pague imposto em duplicidade no Simples Nacional."
+    pdf.cell(0, 6, "Sobre a Mercabiliza", ln=True, fill=True)
+    pdf.set_font("Helvetica", "", 8)
+    pdf.multi_cell(0, 4, tratar_texto_pdf(
+        "Especialista em solucoes contabeis para minimercados autonomos, a Mercabiliza nasceu com um unico proposito: "
+        "apoiar operadores com inteligencia contabil, seguranca trabalhista e estrategias que impulsionam o crescimento. "
+        "Oferecemos contabilidade com foco em performance, analises tributarias personalizadas, departamento pessoal "
+        "preventivo e processos otimizados com tecnologia."
     ))
     pdf.ln(3)
 
+    # Seção 1: Escopo dos Serviços
     pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(0, 7, "2. Nossos Servicos para o seu Negocio", ln=True, fill=True)
-    pdf.set_font("Helvetica", "", 9)
-    pdf.cell(0, 5, "- Apuracao mensal do Simples Nacional com segregacao fiscal de Bebidas e Conveniencia.", ln=True)
-    pdf.cell(0, 5, "- Integracao e conciliacao automatica de relatorios do seu sistema de Totem / Autoatendimento.", ln=True)
-    pdf.cell(0, 5, "- Gestao de Pro-Labore e orientacao continua de regularidade fiscal.", ln=True)
-    pdf.cell(0, 5, "- Orientacao para expansao em novas unidades/condominios sem estourar limites fiscais.", ln=True)
-    pdf.ln(4)
+    pdf.cell(0, 6, "1. Escopo dos Servicos Prestados", ln=True, fill=True)
+    pdf.set_font("Helvetica", "", 8)
+    
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.cell(0, 5, "1.1 AREA CONTABIL:", ln=True)
+    pdf.set_font("Helvetica", "", 8)
+    pdf.cell(0, 4, tratar_texto_pdf("- Classificacao, registro e escrituracao contabil de todas as operacoes financeiras e patrimoniais."), ln=True)
+    pdf.cell(0, 4, tratar_texto_pdf("- Elaboracao do Balanco Patrimonial, DRE e apuracao dos resultados."), ln=True)
+    pdf.cell(0, 4, tratar_texto_pdf("- Entrega das obrigacoes acessorias contabeis (ECD/ECF quando aplicavel)."), ln=True)
+    pdf.ln(2)
 
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.set_fill_color(220, 230, 242)
-    pdf.cell(0, 10, tratar_texto_pdf(f"Honorarios Contabeis Mensais: R$ {hon_sugeridos:,.2f} / mes"), ln=True, align="C", fill=True)
-    pdf.ln(4)
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.cell(0, 5, "1.2 AREA FISCAL:", ln=True)
+    pdf.set_font("Helvetica", "", 8)
+    pdf.cell(0, 4, tratar_texto_pdf("- Escrituracao fiscal completa e apuracao do Simples Nacional com segregacao de PIS/COFINS Monofasico."), ln=True)
+    pdf.cell(0, 4, tratar_texto_pdf("- Elaboracao e entrega do SPED, DCTF, EFD-Reinf, GIA, DAS e DASN."), ln=True)
+    pdf.cell(0, 4, tratar_texto_pdf("- Atendimento consultivo para planejamento tributario de bebidas e conveniência."), ln=True)
+    pdf.ln(2)
+
+    if num_pessoas > 0:
+        pdf.set_font("Helvetica", "B", 8)
+        pdf.cell(0, 5, "1.3 DEPARTAMENTO PESSOAL:", ln=True)
+        pdf.set_font("Helvetica", "", 8)
+        pdf.cell(0, 4, tratar_texto_pdf("- Gestao de empregados, admissoes, rescisoes e controle de folha em conformidade com a CLT."), ln=True)
+        pdf.cell(0, 4, tratar_texto_pdf("- Emissao das guias de encargos sociais (INSS, FGTS, IRRF) e transmissoes do eSocial/DCTFWeb."), ln=True)
+        pdf.ln(2)
+
+    # Seção 2: Resumo Financeiro da Proposta
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(0, 6, "2. Investimento e Honorarios", ln=True, fill=True)
+    pdf.set_font("Helvetica", "", 9)
+
+    # Cálculos Dinâmicos
+    val_base = 350.0
+    val_cnpjs_add = max(0, num_cnpjs - 1) * 50.0
+    
+    # Regra DP: R$ 50 a cada bloco de até 3 pessoas
+    blocos_dp = (num_pessoas + 2) // 3 if num_pessoas > 0 else 0
+    val_dp = blocos_dp * 50.0
+    
+    total_mensal = val_base + val_cnpjs_add + val_dp
+
+    pdf.cell(0, 5, tratar_texto_pdf(f"- Honorarios Contabeis Recorrentes (Mensalidade Base): R$ {val_base:,.2f} / mes"), ln=True)
+    if val_cnpjs_add > 0:
+        pdf.cell(0, 5, tratar_texto_pdf(f"- Adicional por Unidades/CNPJs ({num_cnpjs - 1} filiais x R$ 50): R$ {val_cnpjs_add:,.2f} / mes"), ln=True)
+    if val_dp > 0:
+        pdf.cell(0, 5, tratar_texto_pdf(f"- Adicional Departamento Pessoal ({num_pessoas} vinculos ativos / {blocos_dp} bloco(s)): R$ {val_dp:,.2f} / mes"), ln=True)
+
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(0, 7, tratar_texto_pdf(f"TOTAL MENSALIDADE RECORRENTE: R$ {total_mensal:,.2f} / mes"), ln=True)
+    pdf.set_font("Helvetica", "", 9)
+    pdf.ln(2)
+
+    # Serviços Pontuais
+    if incluir_desenq or incluir_abertura:
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.cell(0, 5, "Servicos Pontuais / Taxa Unica de Implantacao:", ln=True)
+        pdf.set_font("Helvetica", "", 9)
+        if incluir_desenq:
+            pdf.cell(0, 5, tratar_texto_pdf("- Processo de Desenquadramento de MEI: R$ 350,00 (parcela unica)"), ln=True)
+        if incluir_abertura:
+            pdf.cell(0, 5, tratar_texto_pdf("- Constituicao / Abertura de Empresa: R$ 1.600,00 (parcela unica)"), ln=True)
+        pdf.ln(2)
 
     pdf.set_font("Helvetica", "I", 8)
-    pdf.cell(0, 5, tratar_texto_pdf(f"Proposta gerada em {datetime.date.today().strftime('%d/%m/%Y')}. Validade: 15 dias."), ln=True, align="C")
+    pdf.multi_cell(0, 4, tratar_texto_pdf("Servicos extras como Imposto de Renda Pessoa Fisica, alteracoes contratuais complexas e licencas especificas serao cotados a parte. Apos o aceite, enviaremos o Contrato de Prestacao de Servicos formal."))
+    pdf.ln(4)
+
+    # Assinatura
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.cell(0, 4, "Luis Felipe - Socio Mercabiliza Contabilidade", ln=True)
+    pdf.set_font("Helvetica", "", 8)
+    pdf.cell(0, 4, "Telefone: +55 19 99285-3550 | E-mail: luisfelipe@contabilidadeclassea.com.br", ln=True)
+    pdf.cell(0, 4, tratar_texto_pdf(f"Proposta emitida em {datetime.date.today().strftime('%d/%m/%Y')} - Valida por 15 dias."), ln=True)
 
     res = pdf.output()
     return bytes(res) if isinstance(res, (bytes, bytearray)) else bytes(res, encoding='latin-1')
@@ -972,19 +1012,45 @@ with aba1:
             )
 
         st.markdown("---")
-        st.subheader("📄 Gerar Proposta Comercial Personalizada (Mercabiliza)")
-        col_p1, col_p2 = st.columns(2)
-        with col_p1:
-            fat_p = st.number_input("Faturamento Mensal Estimado (R$):", value=25000.0, step=2000.0)
-        with col_p2:
-            hon_p = st.number_input("Honorários Contábeis Sugeridos (R$):", value=490.0, step=50.0)
+        st.subheader("📄 Gerador de Proposta Comercial Personalizada (Mercabiliza)")
+        st.write("Configure os serviços pontuais e recorrentes para montar a proposta oficial em PDF:")
 
-        pdf_proposta = gerar_proposta_minimercado_pdf(d, fat_p, hon_p)
+        # SIMULADOR E SELETOR DINÂMICO DE SERVIÇOS DA PROPOSTA
+        col_sec1, col_sec2 = st.columns(2)
+        with col_sec1:
+            st.markdown("### 🛠️ Serviços Pontuais (Cobrança Única)")
+            inc_desenq = st.checkbox("Desenquadramento de MEI (R$ 350,00)", value=d.get("opcao_mei", False))
+            inc_abertura = st.checkbox("Constituição / Abertura de Empresa (R$ 1.600,00)", value=False)
+
+        with col_sec2:
+            st.markdown("### 🔄 Serviços Recorrentes (Mensalidade)")
+            qtd_cnpjs = st.number_input("Quantidade de Unidades / CNPJs (Matriz + Filiais):", min_value=1, max_value=20, value=1, step=1)
+            qtd_pessoas = st.number_input("Quantidade de Vínculos / Pessoas (Funcionários e Pró-Labore):", min_value=0, max_value=50, value=1, step=1)
+
+        # CÁLCULO PRÉVIO DA PROPOSTA
+        v_base = 350.0
+        v_cnpjs_add = max(0, qtd_cnpjs - 1) * 50.0
+        blocos_dp_calc = (qtd_pessoas + 2) // 3 if qtd_pessoas > 0 else 0
+        v_dp = blocos_dp_calc * 50.0
+        total_recorrente = v_base + v_cnpjs_add + v_dp
+
+        st.info(
+            f"💰 **RESUMO DOS HONORÁRIOS DA PROPOSTA:**\n\n"
+            f"• **Mensalidade Recorrente Calculada:** **R$ {total_recorrente:,.2f} / mês** "
+            f"(Base R$ 350,00 + R$ {v_cnpjs_add:,.2f} filiais + R$ {v_dp:,.2f} DP)\n"
+            f"• **Serviços Pontuais Selecionados:** "
+            f"{'Desenquadramento MEI (R$ 350,00) ' if inc_desenq else ''}"
+            f"{'Constituição de Empresa (R$ 1.600,00)' if inc_abertura else ('Nenhum' if not inc_desenq else '')}"
+        )
+
+        pdf_proposta = gerar_proposta_minimercado_pdf(d, inc_desenq, inc_abertura, qtd_cnpjs, qtd_pessoas)
+        
         st.download_button(
-            label="📄 Baixar Proposta Comercial em PDF",
+            label="📄 Baixar Proposta Comercial Oficial em PDF (.pdf)",
             data=pdf_proposta,
-            file_name=f"proposta_comercial_{d['cnpj']}.pdf",
-            mime="application/pdf"
+            file_name=f"Proposta_Servicos_Contabeis_{d['cnpj']}.pdf",
+            mime="application/pdf",
+            type="primary"
         )
 # ==============================================================================
 # FIM - ABA 1: DOSSIÊ INDIVIDUAL COMPLETO
@@ -1006,7 +1072,6 @@ with aba2:
     with col_c3:
         margem_lucro = st.number_input(f"Margem de Lucro {tipo_lucro_sel} Estimada (%):", value=18.0, step=2.0, key="sim_lucro")
 
-    # ENFATIZANDO O CÁLCULO DE MARGEM BRUTA VS LÍQUIDA NA TELA
     if tipo_lucro_sel == "Bruto":
         margem_real_calc = margem_lucro * 0.30
         lucro_bruto_rs = fat_sim * (margem_lucro / 100.0)
@@ -1019,7 +1084,6 @@ with aba2:
             f"👉 *Ajuste técnico realizado para não inflar o resultado real do mini mercado na apuração fiscal!*"
         )
 
-    # Cálculo dos Regimes (Anual e Mensal Média)
     imp_simp_anual, imp_pres_anual, melhor_reg, econ_anual = comparar_regimes_simples_presumido(fat_sim, margem_lucro, tipo_lucro_sel)
     
     imp_simp_mensal = imp_simp_anual / 12.0
@@ -1150,7 +1214,6 @@ with aba4:
     st.header("🛠️ Diagnóstico e Simulador de Imposto Retroativo do MEI")
     st.write("Calcule a estimativa de impostos retroativos ($R\$) e guias complementares caso o MEI tenha estourado o limite legal.")
     
-    # Exibição de Indicadores EconômicosOficiais do BACEN
     selic_v, ipca_v = obter_indicadores_bacen()
     st.caption(f"🏛️ **Indicadores Macroeconômicos (Banco Central do Brasil em Tempo Real):** Taxa Selic Acumulada: `{selic_v}% a.a.` | IPCA Acumulado: `{ipca_v}% a.a.`")
 

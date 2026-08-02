@@ -163,16 +163,12 @@ def comparar_regimes_simples_presumido(fat_mensal, margem_pct=15.0, tipo_lucro="
     if fat_anual <= 0:
         return 0, 0, "Insira um faturamento válido", 0.0
 
-    # Se a margem for BRUTA, estima-se o Lucro Líquido Real após custos operacionais (~30% da margem bruta)
     if tipo_lucro == "Bruto":
         margem_efetiva_pct = margem_pct * 0.30
     else:
         margem_efetiva_pct = margem_pct
 
-    # 1. Simples Nacional Anexo I (Otimizado com segregação de Monofásicos ~3,3% efetivo no comércio)
     imp_simples = fat_anual * 0.033
-
-    # 2. Lucro Presumido Comércio (~5.9% total estimado sobre o faturamento)
     imp_presumido = fat_anual * 0.059
 
     regimes = {
@@ -183,24 +179,6 @@ def comparar_regimes_simples_presumido(fat_mensal, margem_pct=15.0, tipo_lucro="
     economia_anual = abs(imp_presumido - imp_simples)
 
     return imp_simples, imp_presumido, melhor_regime, economia_anual
-
-def calcular_economia_fator_r(faturamento_mensal, folha_atual):
-    fat_anual = faturamento_mensal * 12
-    folha_anual = folha_atual * 12
-    
-    if fat_anual <= 0:
-        return 0.0, 0.0, 0.0, 0.0, 0.0, False
-        
-    fator_r_pct = (folha_anual / fat_anual) * 100
-    imposto_anexo_v = fat_anual * 0.155
-    imposto_anexo_iii = fat_anual * 0.06
-    economia_anual = imposto_anexo_v - imposto_anexo_iii
-    
-    folha_meta_anual = fat_anual * 0.28
-    pro_labore_meta_mensal = folha_meta_anual / 12
-    
-    alcança_anexo_iii = fator_r_pct >= 28.0
-    return fator_r_pct, imposto_anexo_v, imposto_anexo_iii, economia_anual, pro_labore_meta_mensal, alcança_anexo_iii
 
 def calcular_imposto_retroativo_mei(faturamento_anual, meses_atividade):
     limite_prop = meses_atividade * 6750.0
@@ -269,7 +247,6 @@ def consultar_dossie_completo(cnpj):
     if not dados_br and not dados_ws:
         return None
 
-    # MESCLAGEM DE CONTATOS (TELEFONES E E-MAILS)
     telefones_set = set()
     emails_set = set()
 
@@ -812,18 +789,19 @@ def renderizar_paineis_dossie(d):
             url_wsp = f"https://wa.me/{num_wsp}?text={urllib.parse.quote(msg_wsp)}"
             st.markdown(f"[📱 **Enviar Mensagem no WhatsApp da Empresa**]({url_wsp})")
 
-# --- NAVEGAÇÃO POR ABAS ---
+# --- DEFINIÇÃO E DECLARAÇÃO DAS ABAS PRINCIPAIS ---
 aba1, aba2, aba3, aba4, aba5 = st.tabs([
     "🔍 Dossiê Individual Completo", 
-    "⚔️ Comparador Simples vs. Presumido", 
+    "⚔️ Comparador de Regimes & Economia Monofásica", 
     "📊 Análise em Lote (Upload Excel)", 
     "🛠️ Transição & Calculadora MEI",
     "🗃️ CRM & Banco de Leads"
 ])
 
-# ==========================================
-# ABA 1: DOSSIÊ INDIVIDUAL COMPLETO
-# ==========================================
+
+# ==============================================================================
+# INÍCIO - ABA 1: DOSSIÊ INDIVIDUAL COMPLETO
+# ==============================================================================
 with aba1:
     cnpj_input = st.text_input("Digite o CNPJ do Cliente / Mini Mercado:", placeholder="00.000.000/0001-91")
 
@@ -886,51 +864,72 @@ with aba1:
             file_name=f"proposta_comercial_{d['cnpj']}.pdf",
             mime="application/pdf"
         )
+# ==============================================================================
+# FIM - ABA 1: DOSSIÊ INDIVIDUAL COMPLETO
+# ==============================================================================
 
-# ==========================================
-# ABA 2: COMPARADOR SIMPLES VS. PRESUMIDO (COM SELETOR BRUTO/LÍQUIDO)
-# ==========================================
+
+# ==============================================================================
+# INÍCIO - ABA 2: COMPARADOR DE REGIMES & ECONOMIA MONOFÁSICA
+# ==============================================================================
 with aba2:
-    st.header("⚔️ Comparador de Regimes: Simples Nacional vs. Lucro Presumido")
-    st.write("Simule o impacto fiscal anual entre **Simples Nacional (com otimização de Monofásicos)** e **Lucro Presumido** ajustado à realidade do seu cliente.")
+    st.header("⚔️ Comparador de Regimes & Calculadora de Economia Monofásica")
+    st.write("Simule o impacto fiscal anual entre **Simples Nacional (com segregação de Monofásicos)** e **Lucro Presumido** para Mini Mercados Autônomos.")
     
     col_c1, col_c2, col_c3 = st.columns(3)
     with col_c1:
         fat_sim = st.number_input("Faturamento Médio Mensal (R$):", value=35000.0, step=5000.0, key="sim_fat")
     with col_c2:
-        tipo_lucro_sel = st.radio("O cliente informou o Lucro em valor:", ["Líquido", "Bruto"], horizontal=True)
+        tipo_lucro_sel = st.radio("O cliente informou a Margem de Lucro em:", ["Líquido", "Bruto"], horizontal=True)
     with col_c3:
         margem_lucro = st.number_input(f"Margem de Lucro {tipo_lucro_sel} Estimada (%):", value=18.0, step=2.0, key="sim_lucro")
 
+    # Cálculo dos Regimes
     imp_simp, imp_pres, melhor_reg, econ_anual = comparar_regimes_simples_presumido(fat_sim, margem_lucro, tipo_lucro_sel)
-    pct_r, imp_v, imp_iii, econ_a, pro_meta, alcancou = calcular_economia_fator_r(fat_sim, 3000.0)
 
     st.markdown("---")
-    st.subheader("📊 Comparativo de Impostos Anuais ($R\$) por Regime")
+    st.subheader("📊 Comparativo de Impostos Anuais (R$) por Regime")
     
     m1, m2, m3 = st.columns(3)
     with m1:
         st.metric("Simples Nacional Otimizado", f"R$ {imp_simp:,.2f} / ano")
-        st.caption("Considerando abatimento de PIS/COFINS Monofásico")
+        st.caption("Considerando abate de PIS/COFINS Monofásico")
     with m2:
         st.metric("Lucro Presumido", f"R$ {imp_pres:,.2f} / ano")
-        st.caption("Carga média estimada de 5.9% no comércio")
+        st.caption("Carga média estimada de 5,9% sobre vendas")
     with m3:
-        st.metric("Economia Estimada", f"R$ {econ_anual:,.2f} / ano")
-        st.caption(f"Calculado com base no Lucro {tipo_lucro_sel}")
+        st.metric("Diferença entre Regimes", f"R$ {econ_anual:,.2f} / ano")
+        st.caption(f"Calculado com base na Margem {tipo_lucro_sel}")
 
-    st.success(f"🏆 **MELHOR REGIME ESTIMADO PARA O CLIENTE:** `{melhor_reg.upper()}`")
+    st.success(f"🏆 **MELHOR REGIME ESTIMADO PARA O MINI MERCADO:** `{melhor_reg.upper()}`")
 
     st.markdown("---")
-    st.subheader("💡 Oportunidade do Fator R (Para Empresas de Serviços / TI)")
-    if not alcancou:
-        st.warning(f"Se o cliente for do ramo de tecnologia/serviços, a folha atual ({pct_r:.1f}%) está no **Anexo V (15,5%)**. Ajustando o Pró-labore para **R$ {pro_meta:,.2f}/mês**, ele migra para o **Anexo III (6,0%)** e economiza **R$ {econ_a:,.2f} todos os anos!**")
-    else:
-        st.success("🟢 **Fator R atingido!** O cliente já atinge os 28% da folha e usufruirá da alíquota reduzida de 6,0%.")
+    st.subheader("🛒 Simulador de Economia Real com Produtos Monofásicos")
+    st.write("Mini mercados vendem itens com imposto recolhido antecipadamente na fábrica (bebidas, refrigerantes, água, energéticos, snacks). Indique a participação estimada desses produtos nas vendas totais:")
 
-# ==========================================
-# ABA 3: ANÁLISE EM LOTE (UPLOAD EXCEL)
-# ==========================================
+    pct_monofasico = st.slider("Porcentagem estimada de vendas em Produtos Monofásicos (%):", min_value=10, max_value=90, value=55, step=5)
+
+    vendas_monofasicas_mes = fat_sim * (pct_monofasico / 100.0)
+    economia_das_mes = vendas_monofasicas_mes * 0.0125  
+    economia_das_ano = economia_das_mes * 12
+
+    col_m1, col_m2 = st.columns(2)
+    with col_m1:
+        st.metric("Faturamento Monofásico Estimado / mês", f"R$ {vendas_monofasicas_mes:,.2f}")
+        st.caption(f"Correspondente a {pct_monofasico}% do faturamento bruto")
+    with col_m2:
+        st.metric("Economia Estimada no DAS (Mercabiliza)", f"R$ {economia_das_ano:,.2f} / ano", delta=f"R$ {economia_das_mes:,.2f} / mês")
+        st.caption("Dinheiro recuperado direto na guia mensal pela segregação correta do NCM")
+
+    st.info("💡 **Argumento Comercial de Vendas Mercabiliza:**\n\nMostre ao cliente que o valor economizado com a segregação de Monofásicos na guia mensal muitas vezes **paga integralmente os honorários contábeis da Mercabiliza**, tornando a contratação da sua contabilidade 'gratuita' para o dono do mini mercado!")
+# ==============================================================================
+# FIM - ABA 2: COMPARADOR DE REGIMES & ECONOMIA MONOFÁSICA
+# ==============================================================================
+
+
+# ==============================================================================
+# INÍCIO - ABA 3: ANÁLISE EM LOTE (UPLOAD EXCEL)
+# ==============================================================================
 with aba3:
     st.header("📊 Análise Contábil em Lote (Upload de Planilha)")
     st.write("Envie uma planilha Excel (`.xlsx`) contendo uma coluna chamada **CNPJ** para analisar dezenas de clientes com o **Dossiê Completo de 4 Painéis**.")
@@ -1000,10 +999,14 @@ with aba3:
                 type="primary",
                 use_container_width=True
             )
+# ==============================================================================
+# FIM - ABA 3: ANÁLISE EM LOTE (UPLOAD EXCEL)
+# ==============================================================================
 
-# ==========================================
-# ABA 4: TRANSIÇÃO & CÁLCULO RETROATIVO MEI
-# ==========================================
+
+# ==============================================================================
+# INÍCIO - ABA 4: TRANSIÇÃO & CÁLCULO RETROATIVO MEI
+# ==============================================================================
 with aba4:
     st.header("🛠️ Diagnóstico e Simulador de Imposto Retroativo do MEI")
     st.write("Calcule a estimativa de impostos retroativos ($R\$) e guias complementares caso o MEI tenha estourado o limite legal.")
@@ -1031,10 +1034,14 @@ with aba4:
         st.info(f"💡 **Parecer Técnico da Contabilidade:**\n\n{diag_mei['orientacao']}")
     else:
         st.success("🟢 **MEI REGULAR:** O faturamento está dentro do limite proporcional permitido.")
+# ==============================================================================
+# FIM - ABA 4: TRANSIÇÃO & CÁLCULO RETROATIVO MEI
+# ==============================================================================
 
-# ==========================================
-# ABA 5: CRM & BANCO DE LEADS (SQLITE)
-# ==========================================
+
+# ==============================================================================
+# INÍCIO - ABA 5: CRM & BANCO DE LEADS (SQLITE)
+# ==============================================================================
 with aba5:
     st.header("🗃️ CRM Contábil & Histórico de Prospects (SQLite)")
     st.write("Todos os CNPJs pesquisados na plataforma são salvos automaticamente no banco de dados local da sua máquina.")
@@ -1059,3 +1066,6 @@ with aba5:
         )
     else:
         st.info("Nenhum lead ou CNPJ consultado até o momento. Faça pesquisas na Aba 1 ou Aba 3 para alimentar a base de dados.")
+# ==============================================================================
+# FIM - ABA 5: CRM & BANCO DE LEADS (SQLITE)
+# ==============================================================================

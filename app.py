@@ -884,6 +884,19 @@ with aba2:
     with col_c3:
         margem_lucro = st.number_input(f"Margem de Lucro {tipo_lucro_sel} Estimada (%):", value=18.0, step=2.0, key="sim_lucro")
 
+    # ENFATIZANDO O CÁLCULO DE MARGEM BRUTA VS LÍQUIDA NA TELA
+    if tipo_lucro_sel == "Bruto":
+        margem_real_calc = margem_lucro * 0.30
+        lucro_bruto_rs = fat_sim * (margem_lucro / 100.0)
+        lucro_liquido_rs = fat_sim * (margem_real_calc / 100.0)
+        
+        st.warning(
+            f"📊 **ANÁLISE DE MARGEM MERCABILIZA:**\n\n"
+            f"• **Margem Bruta (Markup de Vendas):** {margem_lucro:.1f}% (R$ {lucro_bruto_rs:,.2f}/mês sobre as vendas)\n"
+            f"• **Margem Líquida Real Estimada (DRE):** **{margem_real_calc:.1f}%** (R$ {lucro_liquido_rs:,.2f}/mês sobram limpos no bolso após pagar CMV, aluguel, energia e taxas do totem).\n\n"
+            f"👉 *Ajuste técnico realizado para não inflar o resultado real do mini mercado na apuração fiscal!*"
+        )
+
     # Cálculo dos Regimes
     imp_simp, imp_pres, melhor_reg, econ_anual = comparar_regimes_simples_presumido(fat_sim, margem_lucro, tipo_lucro_sel)
 

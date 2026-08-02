@@ -874,7 +874,7 @@ with aba1:
 # ==============================================================================
 with aba2:
     st.header("⚔️ Comparador de Regimes & Calculadora de Economia Monofásica")
-    st.write("Simule o impacto fiscal anual entre **Simples Nacional (com segregação de Monofásicos)** e **Lucro Presumido** para Mini Mercados Autônomos.")
+    st.write("Simule o impacto fiscal anual e mensal entre **Simples Nacional (com segregação de Monofásicos)** e **Lucro Presumido** para Mini Mercados Autônomos.")
     
     col_c1, col_c2, col_c3 = st.columns(3)
     with col_c1:
@@ -897,21 +897,25 @@ with aba2:
             f"👉 *Ajuste técnico realizado para não inflar o resultado real do mini mercado na apuração fiscal!*"
         )
 
-    # Cálculo dos Regimes
-    imp_simp, imp_pres, melhor_reg, econ_anual = comparar_regimes_simples_presumido(fat_sim, margem_lucro, tipo_lucro_sel)
+    # Cálculo dos Regimes (Anual e Mensal Média)
+    imp_simp_anual, imp_pres_anual, melhor_reg, econ_anual = comparar_regimes_simples_presumido(fat_sim, margem_lucro, tipo_lucro_sel)
+    
+    imp_simp_mensal = imp_simp_anual / 12.0
+    imp_pres_mensal = imp_pres_anual / 12.0
+    econ_mensal = econ_anual / 12.0
 
     st.markdown("---")
-    st.subheader("📊 Comparativo de Impostos Anuais (R$) por Regime")
+    st.subheader("📊 Comparativo de Impostos (Visão Mensal & Anual)")
     
     m1, m2, m3 = st.columns(3)
     with m1:
-        st.metric("Simples Nacional Otimizado", f"R$ {imp_simp:,.2f} / ano")
+        st.metric("Simples Nacional Otimizado", f"R$ {imp_simp_mensal:,.2f} / mês", delta=f"R$ {imp_simp_anual:,.2f} / ano", delta_color="inverse")
         st.caption("Considerando abate de PIS/COFINS Monofásico")
     with m2:
-        st.metric("Lucro Presumido", f"R$ {imp_pres:,.2f} / ano")
+        st.metric("Lucro Presumido", f"R$ {imp_pres_mensal:,.2f} / mês", delta=f"R$ {imp_pres_anual:,.2f} / ano", delta_color="inverse")
         st.caption("Carga média estimada de 5,9% sobre vendas")
     with m3:
-        st.metric("Diferença entre Regimes", f"R$ {econ_anual:,.2f} / ano")
+        st.metric("Diferença entre Regimes", f"R$ {econ_mensal:,.2f} / mês", delta=f"R$ {econ_anual:,.2f} / ano")
         st.caption(f"Calculado com base na Margem {tipo_lucro_sel}")
 
     st.success(f"🏆 **MELHOR REGIME ESTIMADO PARA O MINI MERCADO:** `{melhor_reg.upper()}`")
@@ -924,21 +928,20 @@ with aba2:
 
     vendas_monofasicas_mes = fat_sim * (pct_monofasico / 100.0)
     economia_das_mes = vendas_monofasicas_mes * 0.0125  
-    economia_das_ano = economia_das_mes * 12
+    economia_das_ano = economia_das_mes * 12.0
 
     col_m1, col_m2 = st.columns(2)
     with col_m1:
-        st.metric("Faturamento Monofásico Estimado / mês", f"R$ {vendas_monofasicas_mes:,.2f}")
+        st.metric("Faturamento Monofásico Estimado", f"R$ {vendas_monofasicas_mes:,.2f} / mês", delta=f"R$ {vendas_monofasicas_mes * 12:,.2f} / ano", delta_color="off")
         st.caption(f"Correspondente a {pct_monofasico}% do faturamento bruto")
     with col_m2:
-        st.metric("Economia Estimada no DAS (Mercabiliza)", f"R$ {economia_das_ano:,.2f} / ano", delta=f"R$ {economia_das_mes:,.2f} / mês")
+        st.metric("Economia Estimada no DAS (Mercabiliza)", f"R$ {economia_das_mes:,.2f} / mês", delta=f"R$ {economia_das_ano:,.2f} / ano")
         st.caption("Dinheiro recuperado direto na guia mensal pela segregação correta do NCM")
 
-    st.info("💡 **Argumento Comercial de Vendas Mercabiliza:**\n\nMostre ao cliente que o valor economizado com a segregação de Monofásicos na guia mensal muitas vezes **paga integralmente os honorários contábeis da Mercabiliza**, tornando a contratação da sua contabilidade 'gratuita' para o dono do mini mercado!")
+    st.info("💡 **Argumento Comercial de Vendas Mercabiliza:**\n\nMostre ao cliente que a economia de **R$ {:.2f}/mês** na guia do DAS cobre grande parte ou a totalidade dos honorários da contabilidade!".format(economia_das_mes))
 # ==============================================================================
 # FIM - ABA 2: COMPARADOR DE REGIMES & ECONOMIA MONOFÁSICA
 # ==============================================================================
-
 
 # ==============================================================================
 # INÍCIO - ABA 3: ANÁLISE EM LOTE (UPLOAD EXCEL)

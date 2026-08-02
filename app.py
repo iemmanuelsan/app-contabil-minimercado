@@ -741,20 +741,24 @@ def gerar_pdf_dossie_completo(emp):
     return bytes(res) if isinstance(res, (bytes, bytearray)) else bytes(res, encoding='latin-1')
 
 # --- GERADOR DE PROPOSTA COMERCIAL EM PDF (MODELO FIEL MERCABILIZA) ---
+# --- GERADOR DE PROPOSTA COMERCIAL EM PDF (MODELO FIEL MERCABILIZA CORRIGIDO) ---
 def gerar_proposta_minimercado_pdf(emp, incluir_desenq, incluir_abertura, num_cnpjs, num_pessoas):
     pdf = FPDF()
     pdf.add_page()
     
-    # Cabeçalho Mercabiliza
+    # Cabeçalho Mercabiliza - Barra Vermelha Corrigida
     pdf.set_fill_color(220, 50, 80) # Tom vermelho/rosa institucional Mercabiliza
-    pdf.rect(0, 0, 210, 12, 'F')
+    pdf.rect(0, 0, 210, 16, 'F')    # Aumentada a altura para 16mm para dar respiro
+    
+    pdf.set_xy(0, 4)                # Posiciona o cursor 4mm abaixo do topo da folha
     pdf.set_text_color(255, 255, 255)
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.cell(0, 6, "MERCABILIZA - CONTABILIDADE PARA MINIMERCADOS", ln=True, align="C")
-    pdf.ln(8)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 8, "MERCABILIZA - CONTABILIDADE PARA MINIMERCADOS", ln=True, align="C")
+    
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(8)                       # Espaçamento para o conteúdo seguinte
     
     # Título da Proposta
-    pdf.set_text_color(0, 0, 0)
     pdf.set_font("Helvetica", "B", 14)
     pdf.cell(0, 8, "PROPOSTA DE PRESTACAO DE SERVICOS CONTABEIS", ln=True, align="L")
     pdf.set_font("Helvetica", "", 9)
@@ -762,7 +766,7 @@ def gerar_proposta_minimercado_pdf(emp, incluir_desenq, incluir_abertura, num_cn
     pdf.cell(0, 5, tratar_texto_pdf(f"Cidade/UF: {emp['municipio']}/{emp['uf']} | Contato: {emp['telefone']}"), ln=True)
     pdf.ln(4)
 
-    # Texto Institucional (Fiel aos PDFs originais)
+    # Texto Institucional
     pdf.set_font("Helvetica", "B", 10)
     pdf.set_fill_color(240, 240, 240)
     pdf.cell(0, 6, "Sobre a Mercabiliza", ln=True, fill=True)
@@ -854,7 +858,6 @@ def gerar_proposta_minimercado_pdf(emp, incluir_desenq, incluir_abertura, num_cn
 
     res = pdf.output()
     return bytes(res) if isinstance(res, (bytes, bytearray)) else bytes(res, encoding='latin-1')
-
 # --- RENDERIZADOR DOS 4 PAINÉIS ---
 def renderizar_paineis_dossie(d):
     c = d["compliance"]

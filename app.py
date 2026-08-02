@@ -180,31 +180,69 @@ def comparar_regimes_simples_presumido(fat_mensal, margem_pct=15.0, tipo_lucro="
 
     return imp_simples, imp_presumido, melhor_regime, economia_anual
 
-def calcular_imposto_retroativo_mei(faturamento_anual, meses_atividade):
+# --- CÁLCULO RETROATIVO DO MEI REVISADO E BLINDADO FISCALMENTE ---
+def calcular_imposto_retroativo_mei(faturamento_anual, meses_atividade, pct_monofasico=55.0):
     limite_prop = meses_atividade * 6750.0
+    
     if faturamento_anual <= limite_prop:
         return {
-            "excesso": 0.0, "pct_excesso": 0.0, "requer_retroativo": False,
-            "imposto_estimado": 0.0, "orientacao": "Faturamento dentro do limite legal. MEI Regular.", "limite_prop": limite_prop
+            "excesso": 0.0,
+            "pct_excesso": 0.0,
+            "requer_retroativo": False,
+            "imposto_estimado": 0.0,
+            "encargos_estimados": 0.0,
+            "imposto_total_com_encargos": 0.0,
+            "orientacao": "🟢 **MEI Regular:** Faturamento dentro do limite proporcional permitido.",
+            "limite_prop": limite_prop
         }
     
     excesso = faturamento_anual - limite_prop
     pct_excesso = (excesso / limite_prop) * 100
     
+    # 1. Alíquota Efetiva do Anexo I do Simples Nacional (Comércio)
+    if faturamento_anual <= 180000.0:
+        aliquota_base = 0.040
+    elif faturamento_anual <= 360000.0:
+        aliquota_base = (faturamento_anual * 0.073 - 5940.0) / faturamento_anual
+    else:
+        aliquota_base = (faturamento_anual * 0.095 - 13860.0) / faturamento_anual
+
+    # Abatimento proporcional de PIS/COFINS Monofásico na guia do DAS
+    fator_desconto_monofasico = 1.0 - ((pct_monofasico / 100.0) * 0.30)
+    aliquota_efetiva = aliquota_base * fator_desconto_monofasico
+
+    # 2. Cenários de Excesso
     if pct_excesso <= 20.0:
-        imposto_estimado = excesso * 0.04
-        orientacao = "Excesso de até 20%. O mini mercado recolhe a guia DAS complementar de Simples Nacional apenas sobre o valor excedente e solicita desenquadramento para 1º de Janeiro do ano seguinte."
+        imposto_bruto = excesso * aliquota_efetiva
         requer_retroativo = False
+        orientacao = (
+            "🟡 **Excesso de até 20% (Desenquadramento para 01/Jan do ano seguinte):**\n"
+            "O cliente recolherá a guia DAS complementar do Simples Nacional apenas sobre o valor excedente no início do próximo ano."
+        )
     else:
         das_pago_total = meses_atividade * 75.0
-        imposto_bruto = faturamento_anual * 0.04
-        imposto_estimado = max(0.0, imposto_bruto - das_pago_total)
-        orientacao = "Excesso acima de 20%! Desenquadramento RETROATIVO a Janeiro (ou mês de abertura). A loja tributa TODO o faturamento do ano como ME no Simples Nacional e compensa as guias DAS-MEI fixas já pagas."
+        imposto_total_me = faturamento_anual * aliquota_efetiva
+        imposto_bruto = max(0.0, imposto_total_me - das_pago_total)
         requer_retroativo = True
-        
+        orientacao = (
+            "🔴 **Excesso acima de 20% (Desenquadramento RETROATIVO Obrigatório):**\n"
+            "O CNPJ é retroativamente tributado como Microempresa (ME) desde o início do ano (ou mês de abertura). "
+            "Todas as vendas do ano serão apuradas no PGDAS-D com compensação das guias DAS-MEI fixas já pagas."
+        )
+
+    # 3. Estimativa de Encargos de Mora em Atraso (Multa + Juros Selic ~15%)
+    encargos_estimados = imposto_bruto * 0.15 if requer_retroativo else 0.0
+    imposto_total_final = imposto_bruto + encargos_estimados
+
     return {
-        "excesso": excesso, "pct_excesso": pct_excesso, "requer_retroativo": requer_retroativo,
-        "imposto_estimado": imposto_estimado, "orientacao": orientacao, "limite_prop": limite_prop
+        "excesso": excesso,
+        "pct_excesso": pct_excesso,
+        "requer_retroativo": requer_retroativo,
+        "imposto_estimado": imposto_bruto,
+        "encargos_estimados": encargos_estimados,
+        "imposto_total_com_encargos": imposto_total_final,
+        "orientacao": orientacao,
+        "limite_prop": limite_prop
     }
 
 def consultar_regularidade_compliance(cnpj, situacao_cadastral="ATIVA"):
@@ -943,6 +981,7 @@ with aba2:
 # FIM - ABA 2: COMPARADOR DE REGIMES & ECONOMIA MONOFÁSICA
 # ==============================================================================
 
+
 # ==============================================================================
 # INÍCIO - ABA 3: ANÁLISE EM LOTE (UPLOAD EXCEL)
 # ==============================================================================
@@ -1041,15 +1080,29 @@ with aba4:
     if diag_mei["excesso"] > 0:
         st.error(f"🔴 **DESENQUADRAMENTO OBRIGATÓRIO:** Faturamento excedeu o limite em **R$ {diag_mei['excesso']:,.2f}** ({diag_mei['pct_excesso']:.1f}% de excesso).")
         
-        m_col1, m_col2 = st.columns(2)
+        m_col1, m_col2, m_col3 = st.columns(3)
         with m_col1:
-            st.metric("Imposto Retroativo / Complementar Estimado", f"R$ {diag_mei['imposto_estimado']:,.2f}")
+            st.metric("Imposto Retroativo Estimado", f"R$ {diag_mei['imposto_estimado']:,.2f}")
+            st.caption("Apurado no Simples Nacional Anexo I")
         with m_col2:
-            st.metric("Modalidade de Excesso", "Até 20% (Guia Complementar)" if not diag_mei['requer_retroativo'] else "Acima de 20% (Retroativo a Jan)")
+            st.metric("Encargos de Mora Estimados", f"R$ {diag_mei['encargos_estimados']:,.2f}")
+            st.caption("Projeção de Multa e Juros Selic")
+        with m_col3:
+            st.metric("Total Estimado com Encargos", f"R$ {diag_mei['imposto_total_com_encargos']:,.2f}")
+            st.caption("Guia PGDAS-D estimada")
 
         st.info(f"💡 **Parecer Técnico da Contabilidade:**\n\n{diag_mei['orientacao']}")
     else:
         st.success("🟢 **MEI REGULAR:** O faturamento está dentro do limite proporcional permitido.")
+
+    st.markdown("---")
+    st.caption(
+        "⚠️ **Aviso de Isenção e Resguardo Técnico:** "
+        "Os valores apresentados nesta calculadora constituem uma **estimativa simulatória gerencial** "
+        "com base nas informações declaradas pelo usuário e nas alíquotas vigentes da LC 123/2006. "
+        "O valor final exato a ser recolhido em guia DARF/DAS é apurado no sistema oficial PGDAS-D/Receita Federal "
+        "após a transmissão das declarações (DASN-SIMEI e PGDAS) pela contabilidade habilitada."
+    )
 # ==============================================================================
 # FIM - ABA 4: TRANSIÇÃO & CÁLCULO RETROATIVO MEI
 # ==============================================================================
